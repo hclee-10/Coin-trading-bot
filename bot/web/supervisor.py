@@ -119,6 +119,9 @@ class BotSupervisor:
         self._positions_error_cache_ttl = positions_error_cache_ttl
         self._positions_cache: tuple[float, list[PositionView] | Exception] | None = None
         self._positions_lock = threading.Lock()
+        # 봇이 멈춰 있을 때의 차트용 캔들 캐시. 포지션과 같은 이유로 캐시한다.
+        self._candles_cache: dict[str, tuple[float, list[dict[str, float]]]] = {}
+        self._candles_lock = threading.Lock()
 
     # ------------------------------------------------------------------
     @property
@@ -210,31 +213,63 @@ class BotSupervisor:
         return snapshot
 
     # ------------------------------------------------------------------
-    def candles(self, symbol: str) -> list[dict[str, float]]:
-        """차트용 캔들. 봇이 받아 둔 것을 그대로 쓴다.
+    def candles(self, symbol: str, *, now: float | None = None) -> list[dict[str, float]]:
+        """차트용 캔들.
 
-        봇이 멈춰 있으면 빈 목록이다 — 요청 스레드가 거래소를 직접 부르지 않는
-        다는 원칙을 지키기 위해서다. 차트를 보려면 봇을 켜면 된다.
+        봇이 도는 동안에는 봇 루프가 이미 받아 둔 것을 쓴다 — 요청 스레드가
+        거래소를 다시 부르면 ccxt 세션이 경쟁하기 때문이다. 봇이 멈춰 있을
+        때는 그 제약이 없으므로 직접 받아 온다. 차트를 보려고 봇을 켜야 할
+        이유는 없다.
         """
-        report = self._engine.last_report if self._engine else None
-        if report is None:
-            return []
-        return [
-            {
-                "time": candle.timestamp // 1000,  # 차트 라이브러리는 초 단위를 쓴다
-                "open": candle.open,
-                "high": candle.high,
-                "low": candle.low,
-                "close": candle.close,
-            }
-            for candle in report.candles.get(symbol, [])
-        ]
+        if self.running:
+            report = self._engine.last_report if self._engine else None
+            return _to_chart(report.candles.get(symbol, [])) if report else []
+
+        clock = (lambda: now) if now is not None else time.monotonic
+        with self._candles_lock:
+            cached = self._candles_cache.get(symbol)
+            if cached is not None and clock() - cached[0] < self._positions_cache_ttl:
+                return cached[1]
+            try:
+                exchange = self._exchange_factory()
+                try:
+                    candles = _to_chart(
+                        exchange.fetch_candles(
+                            symbol, self.config.trading.timeframe,
+                            self.config.trading.candle_limit,
+                        )
+                    )
+                finally:
+                    exchange.close()
+            except Exception:
+                log.warning("%s 차트 캔들 조회 실패", symbol, exc_info=True)
+                # 실패도 캐시해 장애 중 재시도가 폭주하지 않게 한다.
+                self._candles_cache[symbol] = (clock(), [])
+                return []
+            self._candles_cache[symbol] = (clock(), candles)
+            return candles
 
     def contract_size(self, symbol: str) -> float:
+        """손익 계산에 쓰는 계약 크기.
+
+        봇이 한 번이라도 돌았으면 그때 읽어 둔 값을 쓴다. 그 전이라면 거래소에
+        물어본다 — Gate 는 1계약이 0.0001 BTC 라, 이 값을 1 로 두면 수익률이
+        1만 배로 어긋난다.
+        """
         report = self._engine.last_report if self._engine else None
-        if report is None:
+        if report is not None and report.contract_sizes.get(symbol):
+            return report.contract_sizes[symbol]
+        if self.running:
             return 1.0
-        return report.contract_sizes.get(symbol) or 1.0
+        try:
+            exchange = self._exchange_factory()
+            try:
+                return exchange.market(symbol).contract_size or 1.0
+            finally:
+                exchange.close()
+        except Exception:
+            log.debug("%s 계약 크기 조회 실패", symbol, exc_info=True)
+            return 1.0
 
     def performance(self, symbol: str | None = None) -> Performance:
         """기록해 둔 체결과 자기자본으로 성과를 계산한다."""
@@ -341,6 +376,20 @@ class BotSupervisor:
             return messages
         finally:
             exchange.close()
+
+
+def _to_chart(candles) -> list[dict[str, float]]:
+    """차트 라이브러리가 읽는 형태로 바꾼다. 시각은 초 단위를 쓴다."""
+    return [
+        {
+            "time": candle.timestamp // 1000,
+            "open": candle.open,
+            "high": candle.high,
+            "low": candle.low,
+            "close": candle.close,
+        }
+        for candle in candles
+    ]
 
 
 def _iso(value: datetime | None) -> str | None:

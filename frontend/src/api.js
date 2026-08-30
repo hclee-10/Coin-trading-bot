@@ -58,6 +58,7 @@ async function request(path, { method = 'GET', body, isLogin = false } = {}) {
 
 export const api = {
   loginOptions: () => request('/api/login-options'),
+  build: () => request('/api/build'),
   login: (username, password, code) =>
     request('/api/login', {
       method: 'POST',

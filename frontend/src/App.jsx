@@ -12,6 +12,10 @@ import Logs from './components/Logs.jsx'
 const POLL_MS = 2000
 const MAX_LOG_LINES = 500
 
+// 지금 실행 중인 번들 파일명. 서버가 서빙하는 것과 다르면 이 화면이 낡은 것이다.
+// 재배포한 뒤 브라우저가 예전 화면을 캐시해 "왜 안 바뀌지" 로 헤매는 일을 막는다.
+const RUNNING_BUNDLE = import.meta.url.split('/').pop()
+
 export default function App() {
   const [authed, setAuthed] = useState(Boolean(getToken()))
   const [status, setStatus] = useState(null)
@@ -19,6 +23,7 @@ export default function App() {
   const [chart, setChart] = useState(null)
   const [performance, setPerformance] = useState(null)
   const [catalog, setCatalog] = useState(null)
+  const [stale, setStale] = useState(false)
   const [logs, setLogs] = useState([])
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
@@ -59,9 +64,18 @@ export default function App() {
 
     if (statusResult.status === 'fulfilled') setStatus(statusResult.value)
     if (positionsResult.status === 'fulfilled') setPositions(positionsResult.value)
-    if (logsResult.status === 'fulfilled' && logsResult.value.entries.length > 0) {
-      logSeq.current = logsResult.value.latest_seq
-      setLogs((prev) => [...prev, ...logsResult.value.entries].slice(-MAX_LOG_LINES))
+    if (logsResult.status === 'fulfilled') {
+      const { entries, latest_seq: latestSeq } = logsResult.value
+      // 서버가 재시작하면 로그 시퀀스가 초기화된다. 우리가 들고 있던 번호가
+      // 서버보다 크면 그런 경우다 — 그대로 두면 "그 번호 이후" 를 계속 요청해
+      // 아무것도 못 받고 화면의 로그가 영원히 멈춘다.
+      if (latestSeq < logSeq.current) {
+        logSeq.current = 0
+        setLogs([])
+      } else if (entries.length > 0) {
+        logSeq.current = latestSeq
+        setLogs((prev) => [...prev, ...entries].slice(-MAX_LOG_LINES))
+      }
     }
     if (chartResult.status === 'fulfilled') setChart(chartResult.value)
     if (perfResult.status === 'fulfilled') setPerformance(perfResult.value)
@@ -72,6 +86,10 @@ export default function App() {
     if (!authed) return undefined
     // 전략 목록은 바뀌지 않으므로 한 번만 받는다
     api.strategies().then(setCatalog).catch(() => setCatalog(null))
+    api
+      .build()
+      .then(({ bundle }) => setStale(Boolean(bundle) && bundle !== RUNNING_BUNDLE))
+      .catch(() => setStale(false))
     poll()
     const timer = setInterval(poll, POLL_MS)
     return () => clearInterval(timer)
@@ -134,6 +152,13 @@ export default function App() {
         </span>
         <button className="ghost" onClick={logout}>로그아웃</button>
       </header>
+
+      {stale && (
+        <div className="banner warn">
+          <strong>이 화면은 예전 버전입니다.</strong>
+          서버에는 새 버전이 올라와 있습니다. 새로고침(Ctrl+Shift+R)하세요.
+        </div>
+      )}
 
       {status.startup_error && (
         <div className="banner error">

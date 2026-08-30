@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import asdict
 from pathlib import Path
 
@@ -36,6 +37,17 @@ LIVE_CONFIRMATION = "LIVE"
 CLOSE_CONFIRMATION = "CLOSE"
 
 _bearer = HTTPBearer(auto_error=False)
+
+
+def _frontend_bundle(static_dir: Path | None) -> str | None:
+    """index.html 이 참조하는 자바스크립트 번들 파일명을 읽는다."""
+    if static_dir is None:
+        return None
+    index = static_dir / "index.html"
+    if not index.is_file():
+        return None
+    match = re.search(r'/assets/(index-[A-Za-z0-9_-]+\.js)', index.read_text(encoding="utf-8"))
+    return match.group(1) if match else None
 
 
 class LoginRequest(BaseModel):
@@ -128,6 +140,15 @@ def create_app(
     def healthz() -> dict:
         """업타임 점검용. 인증 없이 열리므로 아무 정보도 담지 않는다."""
         return {"ok": True}
+
+    @app.get("/api/build")
+    def get_build() -> dict:
+        """서버가 지금 서빙하는 프론트엔드 번들 이름.
+
+        브라우저가 실행 중인 번들과 다르면 화면이 낡았다는 뜻이다. 재배포 후
+        옛 화면을 보면서 "왜 안 바뀌지" 로 헤매지 않게 하려는 것이다.
+        """
+        return {"bundle": _frontend_bundle(static_dir)}
 
     @app.get("/api/login-options")
     def login_options() -> dict:
@@ -433,13 +454,20 @@ def create_app(
     if static_dir is not None and static_dir.is_dir():
         assets = static_dir / "assets"
         if assets.is_dir():
+            # 자산 파일명에는 내용 해시가 들어 있어 내용이 바뀌면 이름도 바뀐다.
+            # 그래서 오래 캐시해도 안전하다.
             app.mount("/assets", StaticFiles(directory=assets), name="assets")
 
         index = static_dir / "index.html"
 
         @app.get("/")
         def serve_index() -> FileResponse:
-            return FileResponse(index)
+            # index.html 은 절대 캐시하면 안 된다. 이 파일이 낡으면 브라우저가
+            # 예전 자산을 계속 불러와, 재배포해도 옛 화면이 그대로 뜬다.
+            return FileResponse(
+                index,
+                headers={"Cache-Control": "no-cache, must-revalidate", "Pragma": "no-cache"},
+            )
     else:
         @app.get("/")
         def missing_frontend() -> JSONResponse:

@@ -95,7 +95,7 @@ export default function Chart({ symbol, timeframe, candles, markers }) {
       </h2>
       {empty && (
         <div className="empty">
-          봇을 시작하면 차트가 표시됩니다.
+          차트를 불러오는 중입니다…
         </div>
       )}
       <div

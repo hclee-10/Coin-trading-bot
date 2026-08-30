@@ -807,3 +807,106 @@ def test_failed_code_attempts_count_toward_the_lockout():
     assert client.post("/api/login", json=body).status_code in (401, 429)
     assert client.post("/api/login", json=body).status_code in (401, 429)
     assert client.post("/api/login", json=body).status_code == 429
+
+
+# --- 캐시된 옛 화면 감지 ---------------------------------------------------
+def test_index_is_not_cacheable(tmp_path):
+    """index.html 이 캐시되면 재배포해도 브라우저가 옛 화면을 계속 띄운다."""
+    static = tmp_path / "static"
+    (static / "assets").mkdir(parents=True)
+    (static / "index.html").write_text(
+        '<script src="/assets/index-ABC123.js"></script>', encoding="utf-8"
+    )
+    (static / "assets" / "index-ABC123.js").write_text("//", encoding="utf-8")
+
+    config = make_config()
+    app = create_app(
+        config,
+        BotSupervisor(config, exchange_factory=lambda: FakeExchange()),
+        LogBuffer(capacity=5),
+        Account(username=USERNAME, password_hash=hash_password(PASSWORD)),
+        static_dir=static,
+    )
+    client = TestClient(app)
+
+    response = client.get("/")
+
+    assert response.status_code == 200
+    assert "no-cache" in response.headers.get("cache-control", "")
+
+
+def test_build_endpoint_reports_the_served_bundle(tmp_path):
+    """브라우저가 실행 중인 번들과 비교해 화면이 낡았는지 판단한다."""
+    static = tmp_path / "static"
+    static.mkdir()
+    (static / "index.html").write_text(
+        '<script type="module" src="/assets/index-XyZ789.js"></script>', encoding="utf-8"
+    )
+
+    config = make_config()
+    app = create_app(
+        config,
+        BotSupervisor(config, exchange_factory=lambda: FakeExchange()),
+        LogBuffer(capacity=5),
+        Account(username=USERNAME, password_hash=hash_password(PASSWORD)),
+        static_dir=static,
+    )
+
+    body = TestClient(app).get("/api/build").json()
+
+    assert body["bundle"] == "index-XyZ789.js"
+
+
+def test_build_endpoint_without_a_frontend(env):
+    client, *_ = env
+    assert client.get("/api/build").json()["bundle"] is None
+
+
+# --- 봇이 멈춰 있을 때의 차트 ---------------------------------------------
+def test_chart_works_while_the_bot_is_stopped(traded_env):
+    """차트를 보려고 봇을 켜야 할 이유는 없다."""
+    client, supervisor, _ = traded_env
+
+    assert not supervisor.running
+    body = client.get("/api/chart", headers=login(client)).json()
+
+    assert len(body["candles"]) > 0
+
+
+def test_stopped_chart_calls_the_exchange_only_once_per_ttl():
+    """대시보드가 2초마다 폴링한다 — 캐시가 없으면 레이트리밋을 태운다."""
+    from bot.store import Store
+
+    class CountingExchange(FakeExchange):
+        def __init__(self, **kwargs):
+            super().__init__(**kwargs)
+            self.candle_queries = 0
+
+        def fetch_candles(self, symbol, timeframe, limit, since=None):
+            self.candle_queries += 1
+            return super().fetch_candles(symbol, timeframe, limit, since)
+
+    exchange = CountingExchange(price=100.0)
+    config = make_config()
+    supervisor = BotSupervisor(
+        config, exchange_factory=lambda: exchange, store=Store(None),
+        positions_cache_ttl=5.0,
+    )
+
+    for offset in (0.0, 2.0, 4.0):
+        supervisor.candles(SYMBOL, now=offset)
+
+    assert exchange.candle_queries == 1
+
+
+def test_chart_falls_back_to_the_bot_cache_while_running(traded_env):
+    """봇이 도는 동안 요청 스레드가 거래소를 만지면 ccxt 세션이 경쟁한다."""
+    client, supervisor, _ = traded_env
+    headers = login(client)
+    supervisor.start(live=False)
+    try:
+        assert wait_for(lambda: supervisor.snapshot().last_cycle_at is not None)
+        body = client.get("/api/chart", headers=headers).json()
+        assert len(body["candles"]) > 0
+    finally:
+        supervisor.stop()
