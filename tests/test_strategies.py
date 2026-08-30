@@ -315,6 +315,40 @@ def test_ichimoku_mtf_conviction_grows_with_agreement():
     assert best_backed > best_alone
 
 
+def test_ichimoku_rsi_never_buys_below_the_cloud():
+    """구름이 방향 필터다 — 하락 추세에서는 RSI 반등이 나와도 매수하지 않는다."""
+    strategy = get_strategy("ichimoku_rsi")
+    falling = series([300 - i * 0.7 for i in range(220)])
+
+    for end in range(105, 220):
+        assert strategy.generate(context(falling[:end])).action is not SignalAction.ENTER_LONG
+
+
+def test_ichimoku_macd_rejects_a_breakout_without_momentum():
+    """긴 하락 끝의 반짝 돌파 — 위치는 맞지만 속도(MACD)가 아직 음수라 거른다."""
+    strategy = get_strategy("ichimoku_macd")
+    closes = [200 - i * 0.5 for i in range(150)] + [141.0, 141.0]
+
+    signal = strategy.generate(context(series(closes)))
+
+    assert not signal.is_entry
+
+
+def test_ichimoku_sanyaku_enters_only_on_completion():
+    """삼역호전이 완성되는 봉에서 한 번만 — 지속 상태에는 올라타지 않는다."""
+    strategy = get_strategy("ichimoku_sanyaku")
+    # 완성 시점이 워밍업(100봉) 이후에 오도록 횡보를 길게 둔다.
+    closes = [100.0] * 130 + [100 + i * 0.5 for i in range(120)]
+
+    entries = 0
+    candles = series(closes)
+    for end in range(105, len(candles)):
+        if strategy.generate(context(candles[:end])).is_entry:
+            entries += 1
+
+    assert entries == 1
+
+
 def test_exit_signals_never_carry_a_size():
     """청산은 방향만 있으면 된다 — 크기를 붙이면 실행 계층이 혼동한다."""
     strategy = get_strategy("supertrend")
