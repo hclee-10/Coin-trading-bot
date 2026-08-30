@@ -175,6 +175,85 @@ def test_bollinger_pair_reads_the_same_move_oppositely():
     assert reversion.generate(ctx).action is not SignalAction.ENTER_LONG
 
 
+def test_stochastic_reversion_waits_for_the_turn_not_the_fall():
+    """RSI 계열과 같은 원칙 — 바닥권에 있는 동안이 아니라 빠져나올 때 산다."""
+    strategy = get_strategy("stochastic_reversion")
+    falling = series([100 - i for i in range(60)])
+
+    assert strategy.generate(context(falling)).action is SignalAction.HOLD
+
+
+def test_range_fade_buys_the_bottom_and_sells_the_top_of_the_box():
+    """돈치안을 터틀과 정반대로 쓴다 — 채널 끝에서 반대로 진입."""
+    strategy = get_strategy("range_fade", {"period": 40})
+    box = [100.0 + (3.0 if i % 20 < 10 else -3.0) for i in range(80)]
+
+    near_bottom = series(box + [97.2, 97.2])
+    near_top = series(box + [102.8, 102.8])
+
+    assert strategy.generate(context(near_bottom)).action is SignalAction.ENTER_LONG
+    assert strategy.generate(context(near_top)).action is SignalAction.ENTER_SHORT
+
+
+def test_squeeze_breakout_ignores_a_breakout_from_wide_bands():
+    """스퀴즈 없는 돌파는 추세의 끝물일 가능성이 높아 받지 않는다."""
+    strategy = get_strategy("squeeze_breakout")
+    # 변동성이 내내 큰 상태(폭 비율 ≈ 1)에서의 돌파
+    wild = [100.0 + (5.0 if i % 2 else -5.0) for i in range(90)] + [120.0, 120.0]
+
+    signal = strategy.generate(context(series(wild)))
+
+    assert signal.action is SignalAction.HOLD
+    assert "스퀴즈" in signal.reason
+
+
+def test_triple_ma_needs_full_alignment():
+    """두 선만 교차해서는 안 되고 세 선이 정배열되어야 한다."""
+    strategy = get_strategy("triple_ma", {"fast": 5, "mid": 10, "slow": 20})
+    closes = [100 - i * 0.3 for i in range(60)] + [82 + i * 1.5 for i in range(25)]
+
+    actions = []
+    candles = series(closes)
+    for end in range(40, len(candles)):
+        actions.append(strategy.generate(context(candles[:end])).action)
+
+    assert SignalAction.ENTER_LONG in actions
+
+
+def test_adx_trend_skips_crosses_in_chop():
+    """횡보(ADX 낮음)에서의 DI 교차는 무시해야 톱니 손실을 피한다."""
+    strategy = get_strategy("adx_trend", {"adx_threshold": 20})
+    flat = series([100.0 + (0.2 if i % 2 else -0.2) for i in range(120)], wick=0.05)
+
+    for end in range(80, 120):
+        assert not strategy.generate(context(flat[:end])).is_entry
+
+
+def test_obv_trend_requires_volume_confirmation():
+    """가격이 돌파해도 거래량 흐름(OBV)이 받쳐주지 않으면 들어가지 않는다."""
+    strategy = get_strategy("obv_trend")
+    # 내내 하락(OBV 음수 누적)하다 마지막에 가격만 반짝 돌파
+    closes = [130 - i * 0.5 for i in range(60)] + [101 + i * 1.2 for i in range(3)]
+
+    signal = strategy.generate(context(series(closes)))
+
+    assert signal.action is not SignalAction.ENTER_LONG
+
+
+def test_macd_rsi_does_not_chase_an_overbought_turn():
+    """MACD 가 돌아서도 RSI 가 과열이면 추격하지 않는다 — 필터의 존재 이유."""
+    strategy = get_strategy("macd_rsi", {"rsi_ceiling": 65})
+    # 급등 직후의 상향 전환 — RSI 가 과열 상태다
+    closes = [100.0] * 40 + [100 + i * 2.5 for i in range(30)]
+
+    candles = series(closes)
+    for end in range(50, len(candles)):
+        signal = strategy.generate(context(candles[:end]))
+        if signal.is_entry:
+            # 진입했다면 그 시점 RSI 는 과열이 아니었어야 한다
+            assert "여유" in signal.reason
+
+
 def test_exit_signals_never_carry_a_size():
     """청산은 방향만 있으면 된다 — 크기를 붙이면 실행 계층이 혼동한다."""
     strategy = get_strategy("supertrend")
