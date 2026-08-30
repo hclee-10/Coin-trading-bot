@@ -687,3 +687,123 @@ def test_equity_curve_is_recorded(traded_env):
 def test_new_endpoints_require_auth(env, path):
     client, *_ = env
     assert client.get(path).status_code == 401
+
+
+# --- 로그인 2단계 인증 ----------------------------------------------------
+@pytest.fixture
+def totp_env():
+    """2단계 인증을 켠 서버."""
+    from bot.web import totp
+
+    secret = totp.generate_secret()
+    exchange = FakeExchange()
+    config = make_config()
+    supervisor = BotSupervisor(config, exchange_factory=lambda: exchange)
+    app = create_app(
+        config,
+        supervisor,
+        LogBuffer(capacity=20),
+        Account(
+            username=USERNAME,
+            password_hash=hash_password(PASSWORD),
+            totp_secret=secret,
+        ),
+        token_store=TokenStore(ttl_seconds=60),
+        throttle=LoginThrottle(max_attempts=10, lockout_seconds=60),
+    )
+    return TestClient(app), secret
+
+
+def test_login_options_tells_the_screen_to_ask_for_a_code(totp_env):
+    client, _ = totp_env
+    assert client.get("/api/login-options").json()["totp_required"] is True
+
+
+def test_login_options_without_totp(env):
+    client, *_ = env
+    assert client.get("/api/login-options").json()["totp_required"] is False
+
+
+def test_correct_password_without_a_code_is_rejected(totp_env):
+    """2단계 인증의 요점 — 비밀번호만으로는 못 들어온다."""
+    client, _ = totp_env
+
+    response = client.post(
+        "/api/login", json={"username": USERNAME, "password": PASSWORD}
+    )
+
+    assert response.status_code == 401
+    assert "코드" in response.json()["detail"]
+
+
+def test_correct_password_with_a_wrong_code_is_rejected(totp_env):
+    client, secret = totp_env
+    from bot.web import totp
+
+    correct = totp.generate_code(secret)
+    wrong = "000000" if correct != "000000" else "111111"
+
+    response = client.post(
+        "/api/login",
+        json={"username": USERNAME, "password": PASSWORD, "code": wrong},
+    )
+
+    assert response.status_code == 401
+
+
+def test_correct_password_and_code_logs_in(totp_env):
+    client, secret = totp_env
+    from bot.web import totp
+
+    response = client.post(
+        "/api/login",
+        json={
+            "username": USERNAME,
+            "password": PASSWORD,
+            "code": totp.generate_code(secret),
+        },
+    )
+
+    assert response.status_code == 200
+    headers = {"Authorization": f"Bearer {response.json()['token']}"}
+    assert client.get("/api/status", headers=headers).status_code == 200
+
+
+def test_the_same_code_cannot_be_replayed(totp_env):
+    """코드가 30초간 유효하므로, 새어 나간 코드의 재사용을 막아야 한다."""
+    client, secret = totp_env
+    from bot.web import totp
+
+    code = totp.generate_code(secret)
+    body = {"username": USERNAME, "password": PASSWORD, "code": code}
+
+    assert client.post("/api/login", json=body).status_code == 200
+
+    second = client.post("/api/login", json=body)
+    assert second.status_code == 401
+    assert "이미 사용된" in second.json()["detail"]
+
+
+def test_failed_code_attempts_count_toward_the_lockout():
+    """비밀번호를 맞춘 뒤 코드만 무한히 시도할 수 있으면 안 된다."""
+    from bot.web import totp
+
+    config = make_config()
+    app = create_app(
+        config,
+        BotSupervisor(config, exchange_factory=lambda: FakeExchange()),
+        LogBuffer(capacity=10),
+        Account(
+            username=USERNAME,
+            password_hash=hash_password(PASSWORD),
+            totp_secret=totp.generate_secret(),
+        ),
+        token_store=TokenStore(ttl_seconds=60),
+        throttle=LoginThrottle(max_attempts=2, lockout_seconds=60),
+    )
+    client = TestClient(app)
+    body = {"username": USERNAME, "password": PASSWORD, "code": "000000"}
+
+    assert client.post("/api/login", json=body).status_code in (401, 429)
+    assert client.post("/api/login", json=body).status_code in (401, 429)
+    assert client.post("/api/login", json=body).status_code == 429

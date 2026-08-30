@@ -27,6 +27,7 @@ from pydantic import BaseModel, Field
 from bot.config import Config
 from bot.logging_utils import LogBuffer
 from bot.web.auth import Account, LoginThrottle, TokenStore
+from bot.web.totp import UsedCodeTracker
 from bot.web.supervisor import BotSupervisor, SupervisorError
 
 log = logging.getLogger(__name__)
@@ -40,6 +41,8 @@ _bearer = HTTPBearer(auto_error=False)
 class LoginRequest(BaseModel):
     username: str = Field(min_length=1, max_length=256)
     password: str = Field(min_length=1, max_length=512)
+    # 2단계 인증을 쓰지 않는 설정에서는 비워 둔다.
+    code: str = Field(default="", max_length=16)
 
 
 class StartRequest(BaseModel):
@@ -67,6 +70,7 @@ def create_app(
 ) -> FastAPI:
     tokens = token_store or TokenStore()
     login_throttle = throttle or LoginThrottle()
+    used_codes = UsedCodeTracker()
 
     app = FastAPI(title="Coin Trading Bot", docs_url=None, redoc_url=None, openapi_url=None)
 
@@ -125,6 +129,15 @@ def create_app(
         """업타임 점검용. 인증 없이 열리므로 아무 정보도 담지 않는다."""
         return {"ok": True}
 
+    @app.get("/api/login-options")
+    def login_options() -> dict:
+        """로그인 화면이 코드 입력칸을 띄울지 판단하는 데만 쓴다.
+
+        2단계 인증을 켰는지 여부는 비밀이 아니다 — 코드를 요구하면 어차피
+        드러난다. 이 정보가 없으면 사용자가 빈 칸 앞에서 헤맨다.
+        """
+        return {"totp_required": bool(account and account.totp_enabled)}
+
     @app.post("/api/login")
     def login(body: LoginRequest, request: Request) -> dict:
         ip = client_ip(request)
@@ -157,6 +170,27 @@ def create_app(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="아이디 또는 비밀번호가 올바르지 않습니다",
             )
+        if account.totp_enabled:
+            counter = account.verify_totp(body.code)
+            if counter is None:
+                # 비밀번호는 맞았지만 코드가 틀렸다. 이것도 실패로 세야 한다 —
+                # 아니면 비밀번호를 맞춘 뒤 코드만 무한히 시도할 수 있다.
+                login_throttle.record_failure(ip)
+                log.warning("2단계 인증 실패 — ip=%s", ip)
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail="인증 코드가 올바르지 않습니다",
+                )
+            if not used_codes.claim(counter):
+                # 코드는 30초간 유효하다. 그 사이 새어 나간 코드가 그대로 다시
+                # 통하면 2단계 인증의 의미가 반감된다.
+                login_throttle.record_failure(ip)
+                log.warning("이미 사용된 2단계 코드 재사용 시도 — ip=%s", ip)
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail="이미 사용된 코드입니다. 다음 코드를 기다렸다가 입력하세요.",
+                )
+
         login_throttle.reset(ip)
         session = tokens.create()
         log.info("로그인 성공 — ip=%s user=%s", ip, body.username)

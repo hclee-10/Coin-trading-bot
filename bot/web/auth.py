@@ -53,6 +53,8 @@ _CHECKSUM_BYTES = 4
 MIN_PASSWORD_LENGTH = 4
 RECOMMENDED_PASSWORD_LENGTH = 12
 
+from bot.web import totp
+
 USERNAME_ENV = "WEB_USERNAME"
 PASSWORD_ENV = "WEB_PASSWORD_HASH"
 PLAIN_PASSWORD_ENV = "WEB_PASSWORD"
@@ -167,6 +169,11 @@ class Account:
 
     username: str
     password_hash: str
+    totp_secret: str | None = None   # None 이면 2단계 인증을 쓰지 않는다
+
+    @property
+    def totp_enabled(self) -> bool:
+        return bool(self.totp_secret)
 
     def verify(self, username: str, password: str) -> bool:
         """아이디와 비밀번호를 함께 확인한다.
@@ -177,6 +184,15 @@ class Account:
         username_ok = hmac.compare_digest(username, self.username)
         password_ok = verify_password(password, self.password_hash)
         return username_ok and password_ok
+
+    def verify_totp(self, code: str, *, at: float | None = None) -> int | None:
+        """2단계 코드를 확인하고 사용된 시간 구간을 돌려준다.
+
+        구간을 돌려주는 이유는 호출자가 같은 코드의 재사용을 막기 위해서다.
+        """
+        if not self.totp_secret:
+            return None
+        return totp.verify_code(self.totp_secret, code, at=at)
 
 
 def load_account() -> Account:
@@ -203,6 +219,14 @@ def load_account() -> Account:
             f"{USERNAME_ENV} 가 설정되지 않았습니다. 대시보드에 쓸 아이디를 넣으세요."
         )
 
+    totp_secret = os.getenv(totp.TOTP_SECRET_ENV, "").strip()
+    if totp_secret and not totp.is_valid_secret(totp_secret):
+        raise AuthError(
+            f"{totp.TOTP_SECRET_ENV} 형식이 올바르지 않습니다. "
+            "`python -m bot setup-2fa` 가 출력한 비밀키를 그대로 넣으세요."
+        )
+    totp_secret = totp.normalize_secret(totp_secret) if totp_secret else None
+
     if encoded:
         if not is_valid_password_hash(encoded):
             raise AuthError(
@@ -211,11 +235,13 @@ def load_account() -> Account:
                 f"그대로 붙여넣으세요. 더 간단하게 하려면 {PASSWORD_ENV} 를 지우고 "
                 f"{PLAIN_PASSWORD_ENV} 에 비밀번호를 그대로 넣어도 됩니다."
             )
-        return Account(username=username, password_hash=encoded)
+        return Account(username=username, password_hash=encoded, totp_secret=totp_secret)
 
     if plain:
         # 기동 시 한 번 해시한다. 메모리에도 평문을 들고 있지 않게 된다.
-        return Account(username=username, password_hash=hash_password(plain))
+        return Account(
+            username=username, password_hash=hash_password(plain), totp_secret=totp_secret
+        )
 
     raise AuthError(
         f"비밀번호가 설정되지 않았습니다. {PLAIN_PASSWORD_ENV} 에 비밀번호를 그대로 "

@@ -57,8 +57,13 @@ async function request(path, { method = 'GET', body, isLogin = false } = {}) {
 }
 
 export const api = {
-  login: (username, password) =>
-    request('/api/login', { method: 'POST', body: { username, password }, isLogin: true }),
+  loginOptions: () => request('/api/login-options'),
+  login: (username, password, code) =>
+    request('/api/login', {
+      method: 'POST',
+      body: { username, password, code },
+      isLogin: true,
+    }),
   logout: () => request('/api/logout', { method: 'POST' }),
   status: () => request('/api/status'),
   config: () => request('/api/config'),

@@ -103,6 +103,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     sub.add_parser(
+        "setup-2fa",
+        help="2단계 인증 비밀키와 QR 코드를 만든다 (WEB_TOTP_SECRET)",
+    )
+
+    sub.add_parser(
         "check-env",
         help="지금 이 환경에 어떤 환경변수가 들어와 있는지 점검한다 (값은 출력하지 않음)",
     )
@@ -155,6 +160,9 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "hash-password":
         return _cmd_hash_password()
+
+    if args.command == "setup-2fa":
+        return _cmd_setup_2fa()
 
     load_dotenv(args.env_file)
 
@@ -344,6 +352,38 @@ def _cmd_hash_password() -> int:
     return 0
 
 
+def _cmd_setup_2fa() -> int:
+    """2단계 인증 비밀키를 만들고 터미널에 QR 코드를 그린다.
+
+    비밀키는 만든 사람만 보고 지나간다 — 서버에 저장하는 것은 환경변수 하나뿐이고,
+    여기서는 아무것도 파일로 남기지 않는다.
+    """
+    from bot.web import totp
+
+    account = os.getenv("WEB_USERNAME", "").strip() or "dashboard"
+    secret = totp.generate_secret()
+    uri = totp.provisioning_uri(secret, account=account)
+
+    print("2단계 인증 설정\n")
+    try:
+        import qrcode
+
+        qr = qrcode.QRCode(border=1)
+        qr.add_data(uri)
+        qr.print_ascii()
+    except ImportError:
+        print("(QR 코드를 그리려면 `pip install qrcode` — 없으면 아래 키를 직접 입력하세요)\n")
+
+    print("인증 앱(Google Authenticator, Authy 등)으로 위 QR 을 스캔하거나,")
+    print("직접 입력하려면 아래 키를 넣으세요:\n")
+    print(f"  {secret}\n")
+    print("앱에 6자리 코드가 뜨는 것을 확인한 뒤, 아래 줄을 환경변수에 추가하세요:\n")
+    print(f"{totp.TOTP_SECRET_ENV}={secret}\n")
+    print("⚠️  이 키는 다시 볼 수 없습니다. 폰을 잃어버리면 이 키로만 복구할 수 있으니,")
+    print("    안전한 곳(비밀번호 관리자 등)에 따로 보관하세요.")
+    return 0
+
+
 def _cmd_check_env(args) -> int:
     """서버가 실제로 보고 있는 환경변수 상태를 출력한다.
 
@@ -393,6 +433,17 @@ def _cmd_check_env(args) -> int:
         ok = False
         print(f"  {PLAIN_PASSWORD_ENV:20s} ✗ 비밀번호가 설정되지 않았습니다")
         print("                       이 변수에 비밀번호를 그대로 넣으면 됩니다.")
+
+    from bot.web import totp
+
+    totp_secret = os.getenv(totp.TOTP_SECRET_ENV, "").strip()
+    if not totp_secret:
+        print(f"  {totp.TOTP_SECRET_ENV:20s} 없음 — 2단계 인증이 꺼져 있습니다")
+    elif totp.is_valid_secret(totp_secret):
+        print(f"  {totp.TOTP_SECRET_ENV:20s} 설정됨 — 2단계 인증 사용 중")
+    else:
+        ok = False
+        print(f"  {totp.TOTP_SECRET_ENV:20s} ✗ 형식이 올바르지 않습니다")
 
     prefix = config.exchange.id.upper()
     try:
