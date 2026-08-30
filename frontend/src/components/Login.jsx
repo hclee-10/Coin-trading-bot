@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { api, setToken } from '../api.js'
 
 export default function Login({ onSuccess }) {
+  const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
@@ -11,7 +12,7 @@ export default function Login({ onSuccess }) {
     setBusy(true)
     setError('')
     try {
-      const { token } = await api.login(password)
+      const { token } = await api.login(username, password)
       setToken(token)
       setPassword('')
       onSuccess()
@@ -26,27 +27,28 @@ export default function Login({ onSuccess }) {
     <div className="login-wrap">
       <form className="login" onSubmit={submit}>
         <h1>Coin Trading Bot</h1>
-        <p>대시보드에 접속하려면 비밀번호를 입력하세요.</p>
-        {/* 비밀번호 관리자가 항목을 저장할 수 있도록 하는 숨은 사용자명 필드 */}
+        <p>대시보드에 접속하려면 아이디와 비밀번호를 입력하세요.</p>
+        <label htmlFor="username">아이디</label>
         <input
-          type="text"
+          id="username"
           name="username"
+          type="text"
+          value={username}
+          autoFocus
           autoComplete="username"
-          value="dashboard"
-          readOnly
-          hidden
+          onChange={(e) => setUsername(e.target.value)}
         />
-        <label htmlFor="password">비밀번호</label>
+        <label htmlFor="password" style={{ marginTop: 14 }}>비밀번호</label>
         <input
           id="password"
+          name="password"
           type="password"
           value={password}
-          autoFocus
           autoComplete="current-password"
           onChange={(e) => setPassword(e.target.value)}
         />
         {error && <div className="banner error" style={{ marginTop: 14 }}>{error}</div>}
-        <button className="primary" type="submit" disabled={busy || !password}>
+        <button className="primary" type="submit" disabled={busy || !username || !password}>
           {busy ? '확인 중…' : '로그인'}
         </button>
       </form>

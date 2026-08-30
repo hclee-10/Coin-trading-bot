@@ -4,11 +4,12 @@ from fastapi.testclient import TestClient
 from bot.logging_utils import LogBuffer
 from bot.models import Position, PositionSide
 from bot.web.app import create_app
-from bot.web.auth import LoginThrottle, TokenStore, hash_password
+from bot.web.auth import Account, LoginThrottle, TokenStore, hash_password
 from bot.web.supervisor import BotSupervisor
 from tests.fakes import FakeExchange
 from tests.test_supervisor import SYMBOL, make_config, wait_for
 
+USERNAME = "trader"
 PASSWORD = "dashboard-password-1"
 
 
@@ -24,7 +25,7 @@ def env():
         config,
         supervisor,
         buffer,
-        hash_password(PASSWORD),
+        Account(username=USERNAME, password_hash=hash_password(PASSWORD)),
         token_store=TokenStore(ttl_seconds=60),
         throttle=LoginThrottle(max_attempts=3, lockout_seconds=60),
     )
@@ -34,7 +35,9 @@ def env():
 
 
 def login(client) -> dict:
-    response = client.post("/api/login", json={"password": PASSWORD})
+    response = client.post(
+        "/api/login", json={"username": USERNAME, "password": PASSWORD}
+    )
     assert response.status_code == 200
     return {"Authorization": f"Bearer {response.json()['token']}"}
 
@@ -68,17 +71,41 @@ def test_every_control_endpoint_requires_auth(env, method, path):
 
 def test_wrong_password_is_rejected(env):
     client, *_ = env
-    assert client.post("/api/login", json={"password": "nope"}).status_code == 401
+    response = client.post(
+        "/api/login", json={"username": USERNAME, "password": "nope"}
+    )
+    assert response.status_code == 401
+
+
+def test_wrong_username_is_rejected(env):
+    client, *_ = env
+    response = client.post(
+        "/api/login", json={"username": "someone-else", "password": PASSWORD}
+    )
+    assert response.status_code == 401
+
+
+def test_error_message_does_not_reveal_which_field_was_wrong(env):
+    """아이디가 존재하는지 알려 주면 공격자가 절반을 확정하고 시작한다."""
+    client, *_ = env
+    bad_user = client.post(
+        "/api/login", json={"username": "nobody", "password": PASSWORD}
+    ).json()["detail"]
+    bad_pass = client.post(
+        "/api/login", json={"username": USERNAME, "password": "nope"}
+    ).json()["detail"]
+    assert bad_user == bad_pass
 
 
 def test_brute_force_is_locked_out(env):
     client, *_ = env
+    bad = {"username": USERNAME, "password": "nope"}
     for _ in range(3):
-        assert client.post("/api/login", json={"password": "nope"}).status_code == 401
-    response = client.post("/api/login", json={"password": "nope"})
-    assert response.status_code == 429
-    # 잠긴 동안에는 올바른 비밀번호도 막힌다
-    assert client.post("/api/login", json={"password": PASSWORD}).status_code == 429
+        assert client.post("/api/login", json=bad).status_code == 401
+    assert client.post("/api/login", json=bad).status_code == 429
+    # 잠긴 동안에는 올바른 자격증명도 막힌다
+    good = {"username": USERNAME, "password": PASSWORD}
+    assert client.post("/api/login", json=good).status_code == 429
 
 
 def test_logout_revokes_the_token(env):
@@ -239,3 +266,71 @@ def test_frontend_missing_returns_a_helpful_message(env):
     response = client.get("/")
     assert response.status_code == 503
     assert "npm run build" in response.json()["detail"]
+
+
+# --- 프록시 뒤 클라이언트 IP -------------------------------------------
+def make_client(*, trust_proxy: bool, max_attempts: int = 2):
+    """로그인 시도 제한만 확인하는 최소 구성의 앱."""
+    exchange = FakeExchange()
+    config = make_config()
+    supervisor = BotSupervisor(config, exchange_factory=lambda: exchange)
+    app = create_app(
+        config,
+        supervisor,
+        LogBuffer(capacity=10),
+        Account(username=USERNAME, password_hash=hash_password(PASSWORD)),
+        token_store=TokenStore(ttl_seconds=60),
+        throttle=LoginThrottle(max_attempts=max_attempts, lockout_seconds=60),
+        trust_proxy=trust_proxy,
+    )
+    return TestClient(app)
+
+
+def attempt(client, xff: str | None):
+    headers = {"X-Forwarded-For": xff} if xff else {}
+    return client.post(
+        "/api/login", json={"username": USERNAME, "password": "nope"}, headers=headers
+    )
+
+
+def test_proxy_header_is_ignored_when_not_trusted():
+    """프록시 뒤가 아니면 헤더를 믿지 않는다 — 아니면 누구나 IP 를 위장한다."""
+    client = make_client(trust_proxy=False, max_attempts=2)
+
+    assert attempt(client, "1.1.1.1").status_code == 401
+    assert attempt(client, "2.2.2.2").status_code == 401
+    # IP 를 바꿔 보냈어도 같은 버킷으로 세어 잠겨야 한다
+    assert attempt(client, "3.3.3.3").status_code == 429
+
+
+def test_throttle_buckets_by_real_client_behind_a_proxy():
+    """서로 다른 접속자가 남의 실패 때문에 잠기면 안 된다."""
+    client = make_client(trust_proxy=True, max_attempts=2)
+
+    assert attempt(client, "1.1.1.1").status_code == 401
+    assert attempt(client, "1.1.1.1").status_code == 401
+    assert attempt(client, "1.1.1.1").status_code == 429  # 이 사람만 잠김
+
+    assert attempt(client, "9.9.9.9").status_code == 401  # 다른 사람은 멀쩡
+
+
+def test_spoofed_left_entry_cannot_bypass_the_throttle():
+    """X-Forwarded-For 왼쪽은 클라이언트가 위조할 수 있다.
+
+    프록시는 위조된 값 뒤에 진짜 IP 를 덧붙이므로, 왼쪽에서 읽으면 공격자가
+    매 시도마다 다른 IP 를 넣어 시도 제한을 통째로 우회한다.
+    """
+    client = make_client(trust_proxy=True, max_attempts=2)
+
+    # 공격자(5.5.5.5)가 매번 다른 값을 위조해 앞에 붙인다
+    assert attempt(client, "111.111.111.111, 5.5.5.5").status_code == 401
+    assert attempt(client, "222.222.222.222, 5.5.5.5").status_code == 401
+    assert attempt(client, "333.333.333.333, 5.5.5.5").status_code == 429
+
+
+def test_missing_header_behind_a_proxy_falls_back_to_the_peer():
+    client = make_client(trust_proxy=True, max_attempts=2)
+
+    assert attempt(client, None).status_code == 401
+    assert attempt(client, None).status_code == 401
+    assert attempt(client, None).status_code == 429

@@ -1,0 +1,28 @@
+# 시크릿 — 이미지에 절대 들어가면 안 된다
+.env
+config.yaml
+*.key
+
+# 빌드 산출물 (컨테이너 안에서 새로 만든다)
+frontend/node_modules/
+bot/web/static/
+
+# 개발 환경
+.git/
+.gitignore
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+*.egg-info/
+
+# 런타임 산출물
+logs/
+state/
+
+# 런타임에 필요 없는 것들
+tests/
+pytest.ini
+requirements-dev.txt
+README.md

@@ -15,6 +15,10 @@ import yaml
 
 SUPPORTED_EXCHANGES = ("bitget", "okx")
 
+# 컨테이너 배포(Railway 등)에서는 설정 파일을 올리기 번거로우므로 YAML 본문을
+# 환경변수로 통째로 넣을 수 있게 한다. 값이 있으면 파일보다 우선한다.
+CONFIG_ENV = "CONFIG_YAML"
+
 
 class ConfigError(Exception):
     """설정 파일이 없거나 값이 유효하지 않을 때."""
@@ -44,7 +48,8 @@ class Credentials:
         if missing:
             raise ConfigError(
                 f"{exchange_id} 자격증명 누락: {', '.join(missing)}. "
-                ".env.example 을 복사해 .env 를 만들고 값을 채우세요."
+                "로컬에서는 .env.example 을 복사해 .env 를 채우고, "
+                "배포 환경에서는 같은 이름의 환경변수를 설정하세요."
             )
         return cls(api_key=key, secret=secret, password=password)
 
@@ -156,15 +161,28 @@ class Config:
 
     @classmethod
     def load(cls, path: str | Path) -> "Config":
+        """`CONFIG_YAML` 환경변수가 있으면 그 내용을, 없으면 파일을 읽는다."""
+        inline = os.getenv(CONFIG_ENV, "").strip()
+        if inline:
+            return cls.loads(inline, source=CONFIG_ENV)
+
         path = Path(path)
         if not path.exists():
             raise ConfigError(
                 f"설정 파일을 찾을 수 없습니다: {path}. "
-                "config.example.yaml 을 config.yaml 로 복사해 수정하세요."
+                "config.example.yaml 을 config.yaml 로 복사해 수정하거나, "
+                f"{CONFIG_ENV} 환경변수에 YAML 내용을 넣으세요."
             )
-        raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        return cls.loads(path.read_text(encoding="utf-8"), source=str(path))
+
+    @classmethod
+    def loads(cls, text: str, *, source: str = "<문자열>") -> "Config":
+        try:
+            raw = yaml.safe_load(text) or {}
+        except yaml.YAMLError as exc:
+            raise ConfigError(f"{source} 의 YAML 을 해석할 수 없습니다: {exc}") from exc
         if not isinstance(raw, dict):
-            raise ConfigError(f"{path} 의 최상위는 매핑(dict)이어야 합니다")
+            raise ConfigError(f"{source} 의 최상위는 매핑(dict)이어야 합니다")
         config = cls(
             exchange=_build(ExchangeConfig, raw.get("exchange"), "exchange"),
             trading=_build(TradingConfig, raw.get("trading"), "trading"),

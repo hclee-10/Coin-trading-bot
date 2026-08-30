@@ -72,3 +72,33 @@ def test_credentials_are_read_from_env(monkeypatch):
     monkeypatch.setenv("BITGET_API_PASSPHRASE", "p")
     creds = Credentials.from_env("bitget")
     assert (creds.api_key, creds.secret, creds.password) == ("k", "s", "p")
+
+
+# --- 컨테이너 배포용 설정 주입 -------------------------------------------
+def test_config_yaml_env_var_wins_over_the_file(monkeypatch, tmp_path):
+    """컨테이너에는 설정 파일을 올리기 번거로워 환경변수로 넣을 수 있어야 한다."""
+    path = write(tmp_path, "exchange:\n  id: okx\n")
+    monkeypatch.setenv(
+        "CONFIG_YAML",
+        'exchange:\n  id: bitget\n  leverage: 2\ntrading:\n  symbols: ["ETH/USDT:USDT"]\n',
+    )
+    config = Config.load(path)
+    assert config.exchange.id == "bitget"
+    assert config.trading.symbols == ["ETH/USDT:USDT"]
+
+
+def test_file_is_used_when_env_var_is_blank(monkeypatch):
+    monkeypatch.setenv("CONFIG_YAML", "   ")
+    assert Config.load("config.example.yaml").exchange.id == "okx"
+
+
+def test_broken_yaml_in_env_var_names_the_source(monkeypatch):
+    monkeypatch.setenv("CONFIG_YAML", "exchange: [열린괄호")
+    with pytest.raises(ConfigError, match="CONFIG_YAML"):
+        Config.load("config.example.yaml")
+
+
+def test_missing_file_mentions_the_env_var_alternative(tmp_path, monkeypatch):
+    monkeypatch.delenv("CONFIG_YAML", raising=False)
+    with pytest.raises(ConfigError, match="CONFIG_YAML"):
+        Config.load(tmp_path / "nope.yaml")

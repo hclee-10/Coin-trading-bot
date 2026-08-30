@@ -283,3 +283,21 @@ def test_successful_results_use_the_shorter_ttl():
     sup.fetch_positions_live(now=6.0)   # TTL 밖 — 재조회
 
     assert ex.fetch_calls == 2
+
+
+# --- 로깅 견고성 ----------------------------------------------------------
+def test_unwritable_log_path_does_not_stop_the_server(tmp_path):
+    """볼륨이 안 붙었거나 권한이 없어도 서버는 떠야 한다."""
+    import logging
+
+    from bot.logging_utils import setup_logging
+
+    blocker = tmp_path / "notadir"
+    blocker.write_text("")  # 디렉터리 자리에 파일이 있으면 mkdir 이 실패한다
+
+    setup_logging("INFO", str(blocker / "bot.log"))
+    logging.getLogger("t").info("계속 동작")
+
+    handlers = logging.getLogger().handlers
+    assert len(handlers) == 1, "콘솔 핸들러만 남아야 한다"
+    logging.getLogger().handlers.clear()

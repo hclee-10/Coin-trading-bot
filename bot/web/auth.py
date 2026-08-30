@@ -3,7 +3,8 @@
 이 서버는 실제 자금을 움직이는 봇을 제어한다. 인터넷에 노출되면 URL 을 아는
 누구나 두드릴 수 있으므로, 다음을 전제로 만든다:
 
-* **기본 비밀번호는 없다.** `WEB_PASSWORD_HASH` 가 없으면 서버가 뜨지 않는다.
+* **기본 계정은 없다.** `WEB_USERNAME` 과 `WEB_PASSWORD_HASH` 가 모두 없으면
+  서버가 뜨지 않는다.
 * 비밀번호는 scrypt 로 해시해 저장하고, 원문은 어디에도 남기지 않는다.
 * 세션 토큰은 서버 메모리에만 있다 — 프로세스를 재시작하면 전부 무효가 되고,
   로그아웃이 즉시 반영된다(JWT 와 달리 폐기가 확실하다).
@@ -29,6 +30,7 @@ _SCRYPT_DKLEN = 32
 _SCRYPT_MAXMEM = 128 * _SCRYPT_N * _SCRYPT_R * _SCRYPT_P * 2
 _SALT_BYTES = 16
 
+USERNAME_ENV = "WEB_USERNAME"
 PASSWORD_ENV = "WEB_PASSWORD_HASH"
 
 
@@ -67,20 +69,45 @@ def verify_password(password: str, encoded: str) -> bool:
     return hmac.compare_digest(digest.hex(), hash_hex)
 
 
-def load_password_hash() -> str:
-    """환경변수에서 비밀번호 해시를 읽는다. 없으면 서버를 띄우지 않는다."""
+@dataclass(frozen=True)
+class Account:
+    """대시보드에 로그인할 수 있는 단일 계정."""
+
+    username: str
+    password_hash: str
+
+    def verify(self, username: str, password: str) -> bool:
+        """아이디와 비밀번호를 함께 확인한다.
+
+        아이디가 틀려도 비밀번호 해시 계산을 건너뛰지 않는다. 건너뛰면 응답
+        시간 차이로 "이 아이디는 존재한다"가 새어 나간다.
+        """
+        username_ok = hmac.compare_digest(username, self.username)
+        password_ok = verify_password(password, self.password_hash)
+        return username_ok and password_ok
+
+
+def load_account() -> Account:
+    """환경변수에서 계정을 읽는다. 하나라도 없으면 서버를 띄우지 않는다."""
+    username = os.getenv(USERNAME_ENV, "").strip()
     encoded = os.getenv(PASSWORD_ENV, "").strip()
-    if not encoded:
+
+    missing = [
+        name
+        for name, value in ((USERNAME_ENV, username), (PASSWORD_ENV, encoded))
+        if not value
+    ]
+    if missing:
         raise AuthError(
-            f"{PASSWORD_ENV} 가 설정되지 않았습니다. "
-            "`python -m bot hash-password` 로 해시를 만들어 .env 에 넣으세요."
+            f"{', '.join(missing)} 가 설정되지 않았습니다. "
+            "`python -m bot hash-password` 로 아이디와 해시를 만들어 환경변수에 넣으세요."
         )
     if not encoded.startswith("scrypt$"):
         raise AuthError(
             f"{PASSWORD_ENV} 형식이 올바르지 않습니다. "
             "비밀번호 원문이 아니라 `python -m bot hash-password` 의 출력이어야 합니다."
         )
-    return encoded
+    return Account(username=username, password_hash=encoded)
 
 
 @dataclass(frozen=True)

@@ -31,6 +31,24 @@ log = logging.getLogger(__name__)
 
 DEFAULT_CONFIG = "config.yaml"
 STATIC_DIR = Path(__file__).parent / "web" / "static"
+LOCAL_HOSTS = ("127.0.0.1", "localhost", "::1")
+
+
+def _env_flag(name: str) -> bool:
+    return os.getenv(name, "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _on_railway() -> bool:
+    """Railway 컨테이너 안에서 도는지 판단한다.
+
+    Railway 는 이 변수들을 자동으로 넣어 준다. 여기서 참이면 컨테이너는 이미
+    Railway 의 엣지 프록시 뒤에 있으므로, 0.0.0.0 바인딩이 정상이고
+    X-Forwarded-For 를 신뢰해야 접속자를 구분할 수 있다.
+    """
+    return any(
+        os.getenv(name) for name in ("RAILWAY_ENVIRONMENT", "RAILWAY_ENVIRONMENT_NAME",
+                                     "RAILWAY_PROJECT_ID", "RAILWAY_SERVICE_ID")
+    )
 
 
 
@@ -85,12 +103,28 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     web_cmd = sub.add_parser("web", help="웹 대시보드 서버를 실행한다")
+    # PORT 는 Railway 등 PaaS 가 주입한다. 있으면 컨테이너 안이라는 뜻이므로
+    # 모든 인터페이스에 바인드해야 플랫폼 라우터가 접속할 수 있다.
     web_cmd.add_argument(
         "--host",
-        default="127.0.0.1",
-        help="바인드 주소. 기본값은 localhost 전용 — 외부 노출은 리버스 프록시를 통하세요.",
+        default="0.0.0.0" if os.getenv("PORT") else "127.0.0.1",
+        help="바인드 주소. 기본값은 localhost 전용(PORT 환경변수가 있으면 0.0.0.0).",
     )
-    web_cmd.add_argument("--port", type=int, default=8000, help="포트 (기본 8000)")
+    web_cmd.add_argument(
+        "--port", type=int, default=int(os.getenv("PORT") or 8000), help="포트 (기본 8000)"
+    )
+    web_cmd.add_argument(
+        "--trust-proxy",
+        action="store_true",
+        default=_env_flag("TRUST_PROXY") or _on_railway(),
+        help="X-Forwarded-For 로 실제 접속자 IP 를 판별한다. 리버스 프록시 뒤에서만 켤 것.",
+    )
+    web_cmd.add_argument(
+        "--proxy-hops",
+        type=int,
+        default=int(os.getenv("PROXY_HOPS") or 1),
+        help="앞단에 있는 신뢰하는 프록시 단 수 (기본 1).",
+    )
     return parser
 
 
@@ -124,6 +158,11 @@ def main(argv: list[str] | None = None) -> int:
     except ConfigError as exc:
         print(f"설정 오류: {exc}", file=sys.stderr)
         return 2
+
+    # 컨테이너에서는 볼륨 마운트 경로를 환경변수로 주는 편이 YAML 을 고치는 것보다 쉽다.
+    log_file = os.getenv("LOG_FILE", "").strip()
+    if log_file:
+        config.logging.file = log_file
 
     setup_logging(args.log_level or config.logging.level, config.logging.file)
 
@@ -249,17 +288,21 @@ def _cmd_run(config: Config, exchange, args) -> int:
 
 
 def _cmd_hash_password() -> int:
-    """비밀번호를 받아 WEB_PASSWORD_HASH 에 넣을 해시를 출력한다.
+    """대시보드 계정을 만들어 환경변수 두 줄로 출력한다.
 
-    원문은 화면에 찍히지 않고 어디에도 저장되지 않는다.
+    비밀번호 원문은 화면에 찍히지 않고 어디에도 저장되지 않는다.
     """
-    from bot.web.auth import AuthError, hash_password
+    from bot.web.auth import PASSWORD_ENV, USERNAME_ENV, AuthError, hash_password
 
     try:
-        password = getpass.getpass("웹 대시보드 비밀번호: ")
+        username = input("웹 대시보드 아이디: ").strip()
+        password = getpass.getpass("비밀번호: ")
         again = getpass.getpass("다시 입력: ")
     except (EOFError, KeyboardInterrupt):
         print("\n취소했습니다.", file=sys.stderr)
+        return 1
+    if not username:
+        print("아이디를 입력하세요.", file=sys.stderr)
         return 1
     if password != again:
         print("두 입력이 일치하지 않습니다.", file=sys.stderr)
@@ -269,8 +312,9 @@ def _cmd_hash_password() -> int:
     except AuthError as exc:
         print(f"오류: {exc}", file=sys.stderr)
         return 1
-    print("\n아래 줄을 .env 에 추가하세요:\n")
-    print(f"WEB_PASSWORD_HASH={encoded}")
+    print("\n아래 두 줄을 .env(로컬) 또는 Railway 환경변수에 추가하세요:\n")
+    print(f"{USERNAME_ENV}={username}")
+    print(f"{PASSWORD_ENV}={encoded}")
     return 0
 
 
@@ -280,11 +324,11 @@ def _cmd_web(config: Config, args) -> int:
 
     from bot.logging_utils import LogBuffer
     from bot.web.app import create_app
-    from bot.web.auth import AuthError, load_password_hash
+    from bot.web.auth import AuthError, load_account
     from bot.web.supervisor import BotSupervisor
 
     try:
-        password_hash = load_password_hash()
+        account = load_account()
     except AuthError as exc:
         print(f"인증 설정 오류: {exc}", file=sys.stderr)
         return 2
@@ -293,12 +337,20 @@ def _cmd_web(config: Config, args) -> int:
     log_buffer = LogBuffer(capacity=1000)
     setup_logging(args.log_level or config.logging.level, config.logging.file, log_buffer)
 
-    if args.host not in ("127.0.0.1", "localhost", "::1"):
+    if args.host not in LOCAL_HOSTS and not args.trust_proxy:
+        # 프록시 뒤라면 0.0.0.0 이 정상이다. 그게 아니라면 HTTPS 없이 평문으로
+        # 비밀번호와 세션 토큰이 오간다는 뜻이므로 경고한다.
         log.warning(
-            "서버를 %s 로 직접 노출합니다. HTTPS 종료와 접근 제한을 담당하는 "
-            "리버스 프록시(nginx 등) 뒤에 두고, 이 서버는 127.0.0.1 로 바인드하는 "
-            "구성을 권장합니다. README 의 배포 절을 확인하세요.",
+            "서버를 %s 로 직접 노출합니다. HTTPS 종료를 담당하는 리버스 프록시 뒤에 "
+            "두세요 — 그대로 열면 비밀번호와 세션 토큰이 평문으로 오갑니다. "
+            "README 의 배포 절을 확인하세요.",
             args.host,
+        )
+    if args.trust_proxy:
+        log.info(
+            "프록시 신뢰 모드 — X-Forwarded-For 의 오른쪽에서 %d번째 값을 접속자 IP 로 "
+            "사용합니다. 반드시 리버스 프록시 뒤에서만 켜세요.",
+            args.proxy_hops,
         )
     if not STATIC_DIR.is_dir():
         log.warning(
@@ -308,7 +360,15 @@ def _cmd_web(config: Config, args) -> int:
         )
 
     supervisor = BotSupervisor(config)
-    app = create_app(config, supervisor, log_buffer, password_hash, static_dir=STATIC_DIR)
+    app = create_app(
+        config,
+        supervisor,
+        log_buffer,
+        account,
+        static_dir=STATIC_DIR,
+        trust_proxy=args.trust_proxy,
+        proxy_hops=args.proxy_hops,
+    )
 
     log.info("대시보드 서버 시작 — http://%s:%s", args.host, args.port)
     try:

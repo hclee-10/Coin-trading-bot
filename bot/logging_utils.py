@@ -91,13 +91,22 @@ def setup_logging(
     root.addHandler(console)
 
     if file:
-        path = Path(file)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        rotating = logging.handlers.RotatingFileHandler(
-            path, maxBytes=10 * 1024 * 1024, backupCount=5, encoding="utf-8"
-        )
-        rotating.setFormatter(formatter)
-        root.addHandler(rotating)
+        # 로그 파일을 못 여는 이유는 여러 가지다 — 볼륨이 아직 안 붙었거나,
+        # 권한이 없거나, 경로가 읽기 전용이거나. 어느 경우든 서버를 못 뜨게
+        # 만들 이유는 없다. 콘솔 로그는 그대로 나가므로 경고만 남기고 넘어간다.
+        try:
+            path = Path(file)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            rotating = logging.handlers.RotatingFileHandler(
+                path, maxBytes=10 * 1024 * 1024, backupCount=5, encoding="utf-8"
+            )
+        except OSError as exc:
+            root.warning(
+                "로그 파일 '%s' 을 열 수 없어 콘솔로만 기록합니다: %s", file, exc
+            )
+        else:
+            rotating.setFormatter(formatter)
+            root.addHandler(rotating)
 
     if buffer is not None:
         buffer_handler = BufferHandler(buffer)

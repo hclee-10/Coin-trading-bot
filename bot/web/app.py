@@ -26,7 +26,7 @@ from pydantic import BaseModel, Field
 
 from bot.config import Config
 from bot.logging_utils import LogBuffer
-from bot.web.auth import LoginThrottle, TokenStore, verify_password
+from bot.web.auth import Account, LoginThrottle, TokenStore
 from bot.web.supervisor import BotSupervisor, SupervisorError
 
 log = logging.getLogger(__name__)
@@ -38,6 +38,7 @@ _bearer = HTTPBearer(auto_error=False)
 
 
 class LoginRequest(BaseModel):
+    username: str = Field(min_length=1, max_length=256)
     password: str = Field(min_length=1, max_length=512)
 
 
@@ -55,11 +56,13 @@ def create_app(
     config: Config,
     supervisor: BotSupervisor,
     log_buffer: LogBuffer,
-    password_hash: str,
+    account: Account,
     *,
     static_dir: Path | None = None,
     token_store: TokenStore | None = None,
     throttle: LoginThrottle | None = None,
+    trust_proxy: bool = False,
+    proxy_hops: int = 1,
 ) -> FastAPI:
     tokens = token_store or TokenStore()
     login_throttle = throttle or LoginThrottle()
@@ -81,6 +84,25 @@ def create_app(
         return response
 
     def client_ip(request: Request) -> str:
+        """요청을 보낸 실제 클라이언트 IP.
+
+        리버스 프록시(Railway, nginx) 뒤에서는 TCP 피어가 항상 프록시라서
+        `request.client.host` 로는 접속자를 구분할 수 없다. 그대로 두면 누군가
+        비밀번호를 5번 틀리는 순간 프록시 IP 하나가 잠기면서 **모든 사용자가**
+        로그인하지 못한다.
+
+        `X-Forwarded-For` 는 `클라이언트, 프록시1, 프록시2` 순으로 쌓이는데,
+        **맨 왼쪽 값은 클라이언트가 직접 위조할 수 있다** — 헤더를 넣어 보내면
+        프록시가 그 뒤에 진짜 IP 를 덧붙일 뿐이다. 그래서 왼쪽에서 읽으면
+        공격자가 매 시도마다 다른 IP 를 위장해 시도 제한을 통째로 우회한다.
+        신뢰하는 프록시 단 수만큼 **오른쪽에서** 세어야 위조할 수 없는 값을
+        얻는다.
+        """
+        if trust_proxy:
+            forwarded = request.headers.get("x-forwarded-for", "")
+            hops = [part.strip() for part in forwarded.split(",") if part.strip()]
+            if len(hops) >= proxy_hops:
+                return hops[-proxy_hops]
         return request.client.host if request.client else "unknown"
 
     def require_auth(
@@ -112,15 +134,17 @@ def create_app(
                 status_code=status.HTTP_429_TOO_MANY_REQUESTS,
                 detail=f"로그인 시도가 너무 많습니다. {int(locked)}초 후 다시 시도하세요.",
             )
-        if not verify_password(body.password, password_hash):
+        if not account.verify(body.username, body.password):
             login_throttle.record_failure(ip)
+            # 어느 쪽이 틀렸는지 알려 주지 않는다 — 아이디 존재 여부가 새어 나간다.
             log.warning("로그인 실패 — ip=%s", ip)
             raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED, detail="비밀번호가 올바르지 않습니다"
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="아이디 또는 비밀번호가 올바르지 않습니다",
             )
         login_throttle.reset(ip)
         session = tokens.create()
-        log.info("로그인 성공 — ip=%s", ip)
+        log.info("로그인 성공 — ip=%s user=%s", ip, body.username)
         return {"token": session.token, "expires_at": session.expires_at}
 
     @app.post("/api/logout")
