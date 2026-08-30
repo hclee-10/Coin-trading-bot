@@ -4,6 +4,8 @@ import Login from './components/Login.jsx'
 import StatusCards from './components/StatusCards.jsx'
 import Controls from './components/Controls.jsx'
 import Positions from './components/Positions.jsx'
+import Chart from './components/Chart.jsx'
+import Performance from './components/Performance.jsx'
 import Logs from './components/Logs.jsx'
 
 const POLL_MS = 2000
@@ -13,6 +15,8 @@ export default function App() {
   const [authed, setAuthed] = useState(Boolean(getToken()))
   const [status, setStatus] = useState(null)
   const [positions, setPositions] = useState({ source: null, positions: [] })
+  const [chart, setChart] = useState(null)
+  const [performance, setPerformance] = useState(null)
   const [logs, setLogs] = useState([])
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
@@ -33,13 +37,16 @@ export default function App() {
   // 잠깐 실패했다는 이유로 상태 카드와 정지·긴급청산 버튼까지 화면에서
   // 사라진다 — 네트워크가 흔들릴 때가 바로 그 버튼이 가장 필요한 때다.
   const poll = useCallback(async () => {
-    const [statusResult, positionsResult, logsResult] = await Promise.allSettled([
-      api.status(),
-      api.positions(),
-      api.logs(logSeq.current),
-    ])
+    const [statusResult, positionsResult, logsResult, chartResult, perfResult] =
+      await Promise.allSettled([
+        api.status(),
+        api.positions(),
+        api.logs(logSeq.current),
+        api.chart(),
+        api.performance(),
+      ])
 
-    const failures = [statusResult, positionsResult, logsResult].filter(
+    const failures = [statusResult, positionsResult, logsResult, chartResult, perfResult].filter(
       (r) => r.status === 'rejected',
     )
     const expired = failures.find((r) => r.reason?.status === 401)
@@ -54,6 +61,8 @@ export default function App() {
       logSeq.current = logsResult.value.latest_seq
       setLogs((prev) => [...prev, ...logsResult.value.entries].slice(-MAX_LOG_LINES))
     }
+    if (chartResult.status === 'fulfilled') setChart(chartResult.value)
+    if (perfResult.status === 'fulfilled') setPerformance(perfResult.value)
     setError(failures.length > 0 ? failures[0].reason.message : '')
   }, [handleError])
 
@@ -163,7 +172,17 @@ export default function App() {
         onCloseAll={(confirm) => act(() => api.closeAll(confirm))}
       />
 
+      <Chart
+        symbol={chart?.symbol || status.symbols[0]}
+        timeframe={chart?.timeframe || status.timeframe}
+        candles={chart?.candles}
+        markers={chart?.markers}
+      />
+
       <Positions positions={positions.positions} source={positions.source} />
+
+      <Performance performance={performance} currency={status.quote_currency} />
+
       <Logs entries={logs} />
     </div>
   )

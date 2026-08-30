@@ -64,6 +64,8 @@ export const api = {
   config: () => request('/api/config'),
   positions: () => request('/api/positions'),
   logs: (since) => request(`/api/logs?since=${since}`),
+  chart: () => request('/api/chart'),
+  performance: () => request('/api/performance'),
   start: (live, confirm) => request('/api/bot/start', { method: 'POST', body: { live, confirm } }),
   stop: () => request('/api/bot/stop', { method: 'POST' }),
   closeAll: (confirm) =>

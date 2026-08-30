@@ -223,6 +223,97 @@ def create_app(
             ) from exc
         return {"source": "exchange", "at": None, "positions": [asdict(p) for p in positions]}
 
+    @app.get("/api/chart")
+    def get_chart(symbol: str | None = None, _: str = Depends(require_auth)) -> dict:
+        """캔들과 내 체결 지점. 차트에 매수/매도를 표시하는 데 쓴다."""
+        target = symbol or (config.trading.symbols[0] if config.trading.symbols else None)
+        if target is None:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST, detail="심볼이 설정되지 않았습니다"
+            )
+        if target not in config.trading.symbols:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"'{target}' 은 감시 중인 심볼이 아닙니다",
+            )
+
+        candles = supervisor.candles(target)
+        performance = supervisor.performance(target)
+        markers = [
+            {
+                "time": trip.opened_at // 1000,
+                "side": trip.side,
+                "kind": "entry",
+                "price": trip.entry_price,
+            }
+            for trip in performance.trips
+        ] + [
+            {
+                "time": trip.closed_at // 1000,
+                "side": trip.side,
+                "kind": "exit",
+                "price": trip.exit_price,
+                "pnl": trip.pnl,
+            }
+            for trip in performance.trips
+        ]
+        markers.sort(key=lambda m: m["time"])
+        return {
+            "symbol": target,
+            "timeframe": config.trading.timeframe,
+            "candles": candles,
+            "markers": markers,
+        }
+
+    @app.get("/api/performance")
+    def get_performance(symbol: str | None = None, _: str = Depends(require_auth)) -> dict:
+        """자동매매 성과. 수익률은 자기자본 변화로, 승률은 닫힌 왕복으로 센다."""
+        performance = supervisor.performance(symbol)
+        recent = list(reversed(performance.trips))[:50]
+        return {
+            "trade_count": performance.trade_count,
+            "win_count": performance.win_count,
+            "loss_count": performance.loss_count,
+            "win_rate": performance.win_rate,
+            "realized_pnl": performance.realized_pnl,
+            "total_fee": performance.total_fee,
+            "best_pnl": performance.best_pnl,
+            "worst_pnl": performance.worst_pnl,
+            "start_equity": performance.start_equity,
+            "current_equity": performance.current_equity,
+            "equity_change": performance.equity_change,
+            "total_return_pct": performance.total_return_pct,
+            "started_at": performance.started_at,
+            "persistent": bool(supervisor.store and supervisor.store.persistent),
+            "trades": [
+                {
+                    "symbol": t.symbol,
+                    "side": t.side,
+                    "opened_at": t.opened_at,
+                    "closed_at": t.closed_at,
+                    "entry_price": t.entry_price,
+                    "exit_price": t.exit_price,
+                    "amount": t.amount,
+                    "pnl": t.pnl,
+                    "fee": t.fee,
+                    "return_pct": t.return_pct,
+                }
+                for t in recent
+            ],
+        }
+
+    @app.get("/api/equity")
+    def get_equity(_: str = Depends(require_auth)) -> dict:
+        """자기자본 곡선."""
+        if supervisor.store is None:
+            return {"points": []}
+        return {
+            "points": [
+                {"time": p.timestamp // 1000, "value": p.equity}
+                for p in supervisor.store.equity_curve()
+            ]
+        }
+
     @app.get("/api/logs")
     def get_logs(since: int = 0, limit: int = 200, _: str = Depends(require_auth)) -> dict:
         limit = max(1, min(limit, 500))

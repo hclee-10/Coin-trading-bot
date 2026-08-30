@@ -14,14 +14,17 @@ from __future__ import annotations
 import logging
 import signal as signal_module
 import threading
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
 from bot.config import Config
 from bot.exchanges.base import ExchangeError, FuturesExchange
 from bot.execution import ExecutionResult, Executor
-from bot.models import Position, Signal, SignalAction
+from bot.models import Candle, Position, Signal, SignalAction
 from bot.risk import RiskManager
+from bot.store import Fill as StoredFill
+from bot.store import Store
 from bot.strategies import Strategy, StrategyContext, get_strategy
 
 log = logging.getLogger(__name__)
@@ -37,6 +40,10 @@ class CycleReport:
     halted: bool = False
     halt_reason: str = ""
     positions: dict[str, Position] = field(default_factory=dict)
+    # 차트는 봇 루프가 이미 받아 온 캔들을 그대로 쓴다 — 요청 스레드가 거래소를
+    # 다시 부르면 ccxt 세션이 경쟁한다.
+    candles: dict[str, list[Candle]] = field(default_factory=dict)
+    contract_sizes: dict[str, float] = field(default_factory=dict)
     at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
 
@@ -48,10 +55,19 @@ class TradingEngine:
         *,
         dry_run: bool = True,
         strategy: Strategy | None = None,
+        store: Store | None = None,
+        history_interval_sec: float = 60.0,
     ) -> None:
         self.config = config
         self.exchange = exchange
         self.dry_run = dry_run
+        # 기록은 매 주기마다 할 필요가 없다. 폴링이 15초인데 체결 조회까지
+        # 매번 하면 레이트리밋만 태운다.
+        self.store = store
+        self._history_interval = history_interval_sec
+        # None = 아직 한 번도 동기화하지 않음. 0.0 으로 두면 부팅 직후처럼
+        # monotonic() 이 작을 때 첫 동기화가 통째로 건너뛰어진다.
+        self._last_history_sync: float | None = None
         self.strategy = strategy or get_strategy(config.strategy.name, config.strategy.params)
         self.risk = RiskManager(config.risk, leverage=config.exchange.leverage)
         self.executor = Executor(
@@ -64,6 +80,9 @@ class TradingEngine:
         # 웹 대시보드가 폴링으로 읽어 가는 최신 상태. 루프 스레드가 쓰고 다른
         # 스레드가 읽으므로, 매번 새 객체로 통째로 갈아 끼워 찢긴 값을 막는다.
         self.last_report: CycleReport | None = None
+        # 계약 크기는 prepare() 에서 한 번 읽어 둔다 — 손익 계산에 필요한데
+        # 요청 스레드가 거래소를 다시 부를 수는 없다.
+        self._contract_sizes: dict[str, float] = {}
         self.last_error: str | None = None
         self.started_at: datetime | None = None
 
@@ -73,6 +92,7 @@ class TradingEngine:
         self.exchange.load_markets()
         for symbol in self.config.trading.symbols:
             market = self.exchange.market(symbol)  # 없는 심볼이면 여기서 걸린다
+            self._contract_sizes[symbol] = market.contract_size
             self.exchange.set_leverage(
                 symbol, self.config.exchange.leverage, self.config.exchange.margin_mode
             )
@@ -107,9 +127,12 @@ class TradingEngine:
             log.warning("킬스위치 작동 중 — 신규 진입 차단, 청산 신호만 처리합니다")
 
         results: list[ExecutionResult] = []
+        candles: dict[str, list[Candle]] = {}
         for symbol in self.config.trading.symbols:
             try:
-                result = self._process_symbol(symbol, positions[symbol], equity, open_count)
+                result = self._process_symbol(
+                    symbol, positions[symbol], equity, open_count, candles
+                )
             except ExchangeError as exc:
                 log.exception("%s 처리 중 거래소 오류", symbol)
                 result = ExecutionResult(symbol, "rejected", f"거래소 오류: {exc}")
@@ -122,6 +145,8 @@ class TradingEngine:
             elif result.action == "exited":
                 open_count = max(0, open_count - 1)
 
+        self._sync_history(equity)
+
         report = CycleReport(
             equity=equity,
             open_positions=open_count,
@@ -129,16 +154,65 @@ class TradingEngine:
             halted=self.risk.halted,
             halt_reason=self.risk.halt_reason,
             positions=positions,
+            candles=candles,
+            contract_sizes=self._contract_sizes,
         )
         self.last_report = report
         return report
 
+    def _sync_history(self, equity: float) -> None:
+        """체결 내역과 자기자본을 저장소에 남긴다.
+
+        기록이 실패해도 매매는 계속되어야 한다 — 기록은 보조 기능이다.
+        """
+        if self.store is None:
+            return
+        now = time.monotonic()
+        if (
+            self._last_history_sync is not None
+            and now - self._last_history_sync < self._history_interval
+        ):
+            return
+        self._last_history_sync = now
+
+        try:
+            self.store.record_equity(int(datetime.now(timezone.utc).timestamp() * 1000), equity)
+        except Exception:
+            log.exception("자기자본 기록 실패 — 매매는 계속합니다")
+
+        for symbol in self.config.trading.symbols:
+            try:
+                last = self.store.last_fill_timestamp(symbol)
+                # 겹치게 조회한다. 경계에서 체결이 빠지는 것보다 중복이 낫고,
+                # 중복은 저장소가 id 로 걸러 낸다.
+                since = (last - 60_000) if last else None
+                fills = self.exchange.fetch_my_trades(symbol, since)
+                added = self.store.record_fills(
+                    StoredFill(
+                        id=f.id, symbol=f.symbol, timestamp=f.timestamp,
+                        side=f.side.value, price=f.price, amount=f.amount,
+                        cost=f.cost, fee=f.fee,
+                    )
+                    for f in fills
+                )
+                if added:
+                    log.info("%s 체결 %d건 기록", symbol, added)
+            except Exception:
+                log.exception("%s 체결 내역 동기화 실패 — 매매는 계속합니다", symbol)
+
     def _process_symbol(
-        self, symbol: str, position: Position, equity: float, open_count: int
+        self,
+        symbol: str,
+        position: Position,
+        equity: float,
+        open_count: int,
+        candle_sink: dict[str, list[Candle]] | None = None,
     ) -> ExecutionResult:
         candles = self.exchange.fetch_candles(
             symbol, self.config.trading.timeframe, self.config.trading.candle_limit
         )
+        if candle_sink is not None:
+            candle_sink[symbol] = candles
         warmup = self.strategy.warmup_candles
         if warmup and len(candles) < warmup + 1:  # +1: 마지막 미완성 캔들 몫
             return ExecutionResult(

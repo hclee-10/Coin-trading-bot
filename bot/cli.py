@@ -462,6 +462,7 @@ def _cmd_web(args) -> int:
     import uvicorn
 
     from bot.logging_utils import LogBuffer
+    from bot.store import Store
     from bot.web.app import create_app
     from bot.web.auth import AuthError, load_account
     from bot.web.supervisor import BotSupervisor
@@ -522,7 +523,13 @@ def _cmd_web(args) -> int:
             STATIC_DIR,
         )
 
-    supervisor = BotSupervisor(config)
+    # 거래 기록 DB. 볼륨(/data)에 두면 재배포해도 살아남는다.
+    state_dir = os.getenv("STATE_DIR", "").strip() or str(Path(config.logging.file or ".").parent)
+    store = Store(Path(state_dir) / "bot.db")
+    if not store.persistent:
+        log.warning("거래 기록이 메모리에만 남습니다 — 재시작하면 성과 기록이 사라집니다")
+
+    supervisor = BotSupervisor(config, store=store)
     app = create_app(
         config,
         supervisor,

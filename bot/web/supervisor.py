@@ -27,7 +27,9 @@ from bot.exchanges import create_exchange
 from bot.exchanges.base import FuturesExchange
 from bot.execution import Executor
 from bot.models import Position, Signal, SignalAction
+from bot.performance import Performance, summarize
 from bot.risk import RiskManager
+from bot.store import Store
 
 log = logging.getLogger(__name__)
 
@@ -95,8 +97,10 @@ class BotSupervisor:
         join_timeout: float = 60.0,
         positions_cache_ttl: float = 5.0,
         positions_error_cache_ttl: float = 15.0,
+        store: Store | None = None,
     ) -> None:
         self.config = config
+        self.store = store
         self._exchange_factory = exchange_factory or (lambda: create_exchange(config.exchange))
         self._join_timeout = join_timeout
         self._lock = threading.Lock()
@@ -128,7 +132,7 @@ class BotSupervisor:
             if self.running:
                 raise SupervisorError("봇이 이미 실행 중입니다")
             exchange = self._exchange_factory()
-            engine = TradingEngine(self.config, exchange, dry_run=not live)
+            engine = TradingEngine(self.config, exchange, dry_run=not live, store=self.store)
             self._engine = engine
             self._live = live
             self._start_error = None
@@ -204,6 +208,44 @@ class BotSupervisor:
                 if p.is_open
             ]
         return snapshot
+
+    # ------------------------------------------------------------------
+    def candles(self, symbol: str) -> list[dict[str, float]]:
+        """차트용 캔들. 봇이 받아 둔 것을 그대로 쓴다.
+
+        봇이 멈춰 있으면 빈 목록이다 — 요청 스레드가 거래소를 직접 부르지 않는
+        다는 원칙을 지키기 위해서다. 차트를 보려면 봇을 켜면 된다.
+        """
+        report = self._engine.last_report if self._engine else None
+        if report is None:
+            return []
+        return [
+            {
+                "time": candle.timestamp // 1000,  # 차트 라이브러리는 초 단위를 쓴다
+                "open": candle.open,
+                "high": candle.high,
+                "low": candle.low,
+                "close": candle.close,
+            }
+            for candle in report.candles.get(symbol, [])
+        ]
+
+    def contract_size(self, symbol: str) -> float:
+        report = self._engine.last_report if self._engine else None
+        if report is None:
+            return 1.0
+        return report.contract_sizes.get(symbol) or 1.0
+
+    def performance(self, symbol: str | None = None) -> Performance:
+        """기록해 둔 체결과 자기자본으로 성과를 계산한다."""
+        if self.store is None:
+            return Performance()
+        target = symbol or (self.config.trading.symbols[0] if self.config.trading.symbols else None)
+        return summarize(
+            self.store.fills(target),
+            self.store.equity_curve(),
+            contract_size=self.contract_size(target) if target else 1.0,
+        )
 
     def fetch_positions_live(self, *, now: float | None = None) -> list[PositionView]:
         """거래소에 직접 물어본다. 봇이 멈춰 있을 때만 쓴다.

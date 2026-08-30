@@ -113,6 +113,9 @@ th { color: var(--muted); font-size: 12px; font-weight: 500; }
 tbody tr:last-child td { border-bottom: none; }
 .empty { padding: 24px 16px; color: var(--muted); text-align: center; }
 
+/* --- 차트 --- */
+.chart { width: 100%; background: #0b0e13; }
+
 /* --- 로그 --- */
 .logs { max-height: 340px; overflow-y: auto; background: #0b0e13; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
 .log-line { display: flex; gap: 10px; padding: 3px 16px; white-space: pre-wrap; word-break: break-word; }
@@ -134,3 +137,11 @@ tbody tr:last-child td { border-bottom: none; }
 .login p { color: var(--muted); font-size: 13px; margin: 0 0 20px; }
 .login label { display: block; font-size: 13px; margin-bottom: 6px; color: var(--muted); }
 .login button { width: 100%; margin-top: 14px; }
+
+code {
+  background: var(--panel-2);
+  padding: 1px 5px;
+  border-radius: 4px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+}

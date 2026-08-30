@@ -590,3 +590,100 @@ def test_whitespace_around_the_plain_password_is_trimmed(monkeypatch):
     monkeypatch.setenv("WEB_PASSWORD", "  1234\n")
 
     assert load_account().verify("uta24", "1234") is True
+
+
+# --- 차트 / 성과 ----------------------------------------------------------
+@pytest.fixture
+def traded_env():
+    """체결 기록이 있는 서버."""
+    from bot.models import Fill as ModelFill
+    from bot.models import Side
+    from bot.store import Store
+
+    exchange = FakeExchange(price=100.0, equity=10_500.0)
+    exchange.my_trades = [
+        ModelFill("t1", SYMBOL, 1_700_000_000_000, Side.BUY, 100.0, 10, 1000.0, 0.5),
+        ModelFill("t2", SYMBOL, 1_700_000_600_000, Side.SELL, 110.0, 10, 1100.0, 0.5),
+    ]
+    config = make_config()
+    store = Store(None)
+    supervisor = BotSupervisor(config, exchange_factory=lambda: exchange, store=store)
+    app = create_app(
+        config,
+        supervisor,
+        LogBuffer(capacity=20),
+        Account(username=USERNAME, password_hash=hash_password(PASSWORD)),
+        token_store=TokenStore(ttl_seconds=60),
+    )
+    client = TestClient(app)
+    yield client, supervisor, store
+    supervisor.stop()
+
+
+def test_performance_reports_the_closed_round_trip(traded_env):
+    client, supervisor, _ = traded_env
+    headers = login(client)
+    supervisor.start(live=False)
+    assert wait_for(lambda: supervisor.snapshot().last_cycle_at is not None)
+
+    body = client.get("/api/performance", headers=headers).json()
+
+    assert body["trade_count"] == 1
+    assert body["win_count"] == 1
+    assert body["win_rate"] == pytest.approx(100.0)
+    assert body["realized_pnl"] == pytest.approx(100.0 - 1.0)  # 수수료 0.5 + 0.5
+    (trade,) = body["trades"]
+    assert trade["side"] == "long"
+    assert trade["entry_price"] == pytest.approx(100.0)
+    assert trade["exit_price"] == pytest.approx(110.0)
+
+
+def test_performance_is_empty_before_any_trading(env):
+    client, *_ = env
+    body = client.get("/api/performance", headers=login(client)).json()
+
+    assert body["trade_count"] == 0
+    assert body["win_rate"] is None
+    assert body["trades"] == []
+
+
+def test_chart_returns_candles_and_markers(traded_env):
+    client, supervisor, _ = traded_env
+    headers = login(client)
+    supervisor.start(live=False)
+    assert wait_for(lambda: supervisor.snapshot().last_cycle_at is not None)
+
+    body = client.get("/api/chart", headers=headers).json()
+
+    assert body["symbol"] == SYMBOL
+    assert len(body["candles"]) > 0
+    assert all({"time", "open", "high", "low", "close"} <= set(c) for c in body["candles"])
+    # 진입과 청산이 각각 하나씩 표시된다
+    kinds = [m["kind"] for m in body["markers"]]
+    assert kinds.count("entry") == 1 and kinds.count("exit") == 1
+
+
+def test_chart_rejects_a_symbol_the_bot_is_not_watching(env):
+    client, *_ = env
+    response = client.get("/api/chart?symbol=DOGE/USDT:USDT", headers=login(client))
+
+    assert response.status_code == 400
+    assert "감시 중인 심볼이 아닙니다" in response.json()["detail"]
+
+
+def test_equity_curve_is_recorded(traded_env):
+    client, supervisor, _ = traded_env
+    headers = login(client)
+    supervisor.start(live=False)
+    assert wait_for(lambda: supervisor.snapshot().last_cycle_at is not None)
+
+    body = client.get("/api/equity", headers=headers).json()
+
+    assert len(body["points"]) >= 1
+    assert body["points"][0]["value"] == pytest.approx(10_500.0)
+
+
+@pytest.mark.parametrize("path", ["/api/chart", "/api/performance", "/api/equity"])
+def test_new_endpoints_require_auth(env, path):
+    client, *_ = env
+    assert client.get(path).status_code == 401

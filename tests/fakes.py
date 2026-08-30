@@ -5,7 +5,7 @@ from __future__ import annotations
 import itertools
 
 from bot.exchanges.base import FuturesExchange
-from bot.models import Balance, Candle, Market, Order, Position, Ticker
+from bot.models import Balance, Candle, Fill, Market, Order, Position, Ticker
 
 
 class FakeExchange(FuturesExchange):
@@ -24,6 +24,7 @@ class FakeExchange(FuturesExchange):
         self.contract_size = contract_size
         self.candle_count = candles
         self.positions: dict[str, Position] = {}
+        self.my_trades: list[Fill] = []
         self.sent_orders: list[Order] = []
         self.cancelled: list[str] = []
         self.leverage_calls: list[tuple[str, float, str]] = []
@@ -89,6 +90,12 @@ class FakeExchange(FuturesExchange):
 
     def fetch_open_orders(self, symbol):
         return []
+
+    def fetch_my_trades(self, symbol, since=None):
+        trades = [t for t in self.my_trades if t.symbol == symbol]
+        if since is not None:
+            trades = [t for t in trades if t.timestamp >= since]
+        return sorted(trades, key=lambda t: t.timestamp)
 
     def cancel_all_orders(self, symbol: str) -> None:
         self.cancelled.append(symbol)

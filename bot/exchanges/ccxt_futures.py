@@ -25,7 +25,17 @@ from typing import Any, Callable, TypeVar
 import ccxt
 
 from bot.exchanges.base import ExchangeError, FuturesExchange
-from bot.models import Balance, Candle, Market, Order, Position, PositionSide, Side, Ticker
+from bot.models import (
+    Balance,
+    Candle,
+    Fill,
+    Market,
+    Order,
+    Position,
+    PositionSide,
+    Side,
+    Ticker,
+)
 
 log = logging.getLogger(__name__)
 
@@ -291,6 +301,33 @@ class CcxtFuturesExchange(FuturesExchange):
                               bool(raw.get("reduceOnly")))
                 )
         return orders
+
+    def fetch_my_trades(self, symbol: str, since: int | None = None) -> list[Fill]:
+        self._require_markets()
+        raw_list = self._call(self._ex.fetch_my_trades, symbol, since, None, {})
+        fills: list[Fill] = []
+        for raw in raw_list or []:
+            trade_id = raw.get("id") or raw.get("order")
+            timestamp = raw.get("timestamp")
+            price = _maybe_float(raw.get("price"))
+            amount = _maybe_float(raw.get("amount"))
+            if not trade_id or timestamp is None or price is None or amount is None:
+                continue
+            fee = raw.get("fee") or {}
+            fills.append(
+                Fill(
+                    id=str(trade_id),
+                    symbol=raw.get("symbol") or symbol,
+                    timestamp=int(timestamp),
+                    side=Side.BUY if (raw.get("side") or "buy").lower() == "buy" else Side.SELL,
+                    price=price,
+                    amount=abs(amount),
+                    cost=_maybe_float(raw.get("cost")) or 0.0,
+                    fee=abs(_maybe_float(fee.get("cost")) or 0.0),
+                )
+            )
+        fills.sort(key=lambda f: f.timestamp)
+        return fills
 
     def cancel_all_orders(self, symbol: str) -> None:
         """일반 주문과 트리거(손절/익절) 주문을 모두 취소한다.

@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 
-from bot.models import Balance, Candle, Market, Order, Position, Side, Ticker
+from bot.models import Balance, Candle, Fill, Market, Order, Position, Side, Ticker
 
 
 class ExchangeError(Exception):
@@ -72,6 +72,14 @@ class FuturesExchange(ABC):
     @abstractmethod
     def fetch_open_orders(self, symbol: str) -> list[Order]:
         ...
+
+    @abstractmethod
+    def fetch_my_trades(self, symbol: str, since: int | None = None) -> list[Fill]:
+        """내 체결 내역을 오래된 것부터 반환한다.
+
+        봇이 낸 주문만으로는 기록이 불완전하다 — 손절·익절은 거래소에 걸어 두므로
+        봇이 모르는 사이에 체결된다. 성과 계산은 이쪽을 근거로 해야 맞다.
+        """
 
     @abstractmethod
     def cancel_all_orders(self, symbol: str) -> None:

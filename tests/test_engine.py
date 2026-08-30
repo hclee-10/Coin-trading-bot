@@ -143,3 +143,93 @@ def test_position_fetch_failure_is_isolated_per_symbol():
 
     assert strategy.seen[0].position.side is PositionSide.FLAT
     assert report.open_positions == 0
+
+
+# --- 기록 ----------------------------------------------------------------
+def test_cycle_records_equity_and_fills():
+    from bot.models import Fill, Side
+    from bot.store import Store
+
+    ex = FakeExchange(price=100.0, equity=9_320.0)
+    ex.my_trades = [
+        Fill(id="t1", symbol=SYMBOL, timestamp=1_700_000_000_000, side=Side.BUY,
+             price=100.0, amount=10, cost=1000.0, fee=0.5),
+    ]
+    store = Store(None)
+    engine = TradingEngine(make_config(), ex, dry_run=True, store=store)
+
+    engine.run_cycle()
+
+    assert [p.equity for p in store.equity_curve()] == [9_320.0]
+    assert [f.id for f in store.fills()] == ["t1"]
+
+
+def test_history_sync_is_throttled():
+    """폴링이 15초인데 체결 조회까지 매번 하면 레이트리밋만 태운다."""
+    from bot.store import Store
+
+    class CountingExchange(FakeExchange):
+        def __init__(self, **kwargs):
+            super().__init__(**kwargs)
+            self.trade_queries = 0
+
+        def fetch_my_trades(self, symbol, since=None):
+            self.trade_queries += 1
+            return []
+
+    ex = CountingExchange(price=100.0, equity=1_000.0)
+    engine = TradingEngine(
+        make_config(), ex, dry_run=True, store=Store(None), history_interval_sec=3600
+    )
+
+    for _ in range(5):
+        engine.run_cycle()
+
+    assert ex.trade_queries == 1
+
+
+def test_history_failure_does_not_stop_trading():
+    """기록은 보조 기능이다 — 실패해도 매매 주기는 끝까지 돌아야 한다."""
+    from bot.store import Store
+
+    class BrokenHistory(FakeExchange):
+        def fetch_my_trades(self, symbol, since=None):
+            raise RuntimeError("거래소 오류")
+
+    ex = BrokenHistory(price=100.0, equity=1_000.0)
+    engine = TradingEngine(make_config(), ex, dry_run=True, store=Store(None))
+
+    report = engine.run_cycle()
+
+    assert report.equity == 1_000.0
+    assert report.results[0].action == "none"
+
+
+def test_first_history_sync_happens_even_soon_after_boot(monkeypatch):
+    """monotonic() 은 부팅 이후 경과 시간이라 작을 수 있다.
+
+    타이머 초기값을 0 으로 두면 그때 첫 동기화가 통째로 건너뛰어진다.
+    """
+    import time as time_module
+
+    from bot.store import Store
+
+    class CountingExchange(FakeExchange):
+        def __init__(self, **kwargs):
+            super().__init__(**kwargs)
+            self.trade_queries = 0
+
+        def fetch_my_trades(self, symbol, since=None):
+            self.trade_queries += 1
+            return []
+
+    monkeypatch.setattr(time_module, "monotonic", lambda: 5.0)  # 부팅 5초 후
+
+    ex = CountingExchange(price=100.0, equity=1_000.0)
+    engine = TradingEngine(
+        make_config(), ex, dry_run=True, store=Store(None), history_interval_sec=3600
+    )
+
+    engine.run_cycle()
+
+    assert ex.trade_queries == 1

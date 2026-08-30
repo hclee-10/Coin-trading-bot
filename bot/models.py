@@ -101,6 +101,20 @@ class Order:
 
 
 @dataclass(frozen=True)
+class Fill:
+    """거래소에서 실제로 체결된 한 건."""
+
+    id: str
+    symbol: str
+    timestamp: int      # ms
+    side: Side
+    price: float
+    amount: float       # 계약 수
+    cost: float         # 견적통화 기준 체결금액
+    fee: float = 0.0
+
+
+@dataclass(frozen=True)
 class Market:
     """주문 수량·가격을 거래소 규격에 맞추는 데 필요한 심볼 메타데이터."""
 
