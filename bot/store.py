@@ -37,6 +37,49 @@ CREATE TABLE IF NOT EXISTS equity (
     timestamp   INTEGER PRIMARY KEY,  -- ms
     equity      REAL NOT NULL
 );
+
+-- 전략 경쟁 모의매매. 전략마다 독립된 가상 계좌를 굴린다.
+CREATE TABLE IF NOT EXISTS paper_accounts (
+    strategy     TEXT PRIMARY KEY,
+    start_equity REAL NOT NULL,
+    started_at   INTEGER NOT NULL,
+    peak_equity  REAL NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS paper_trades (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    strategy     TEXT NOT NULL,
+    symbol       TEXT NOT NULL,
+    side         TEXT NOT NULL,          -- long | short
+    opened_at    INTEGER NOT NULL,
+    closed_at    INTEGER NOT NULL,
+    entry_price  REAL NOT NULL,
+    exit_price   REAL NOT NULL,
+    amount       REAL NOT NULL,
+    notional     REAL NOT NULL,
+    pnl          REAL NOT NULL,
+    fee          REAL NOT NULL,
+    exit_reason  TEXT NOT NULL,          -- signal | stop | reverse
+    conviction   REAL NOT NULL,
+    worst_excursion_pct REAL NOT NULL DEFAULT 0  -- 청산가까지 얼마나 갔는지
+);
+CREATE INDEX IF NOT EXISTS idx_paper_trades_strategy ON paper_trades(strategy, closed_at);
+
+-- 진행 중인 가상 포지션. 재시작해도 이어서 굴리기 위해 저장한다.
+CREATE TABLE IF NOT EXISTS paper_positions (
+    strategy     TEXT NOT NULL,
+    symbol       TEXT NOT NULL,
+    side         TEXT NOT NULL,
+    opened_at    INTEGER NOT NULL,
+    entry_price  REAL NOT NULL,
+    amount       REAL NOT NULL,
+    notional     REAL NOT NULL,
+    stop_loss    REAL NOT NULL,
+    entry_fee    REAL NOT NULL,
+    conviction   REAL NOT NULL,
+    worst_excursion_pct REAL NOT NULL DEFAULT 0,
+    PRIMARY KEY (strategy, symbol)
+);
 """
 
 
@@ -164,6 +207,99 @@ class Store:
                 "SELECT * FROM equity ORDER BY timestamp ASC LIMIT 1"
             ).fetchone()
         return EquityPoint(timestamp=row["timestamp"], equity=row["equity"]) if row else None
+
+    # ------------------------------------------------------------------
+    # 전략 경쟁 모의매매
+    # ------------------------------------------------------------------
+    def paper_account(self, strategy: str, *, start_equity: float, now_ms: int) -> dict[str, Any]:
+        """전략의 가상 계좌를 가져오거나 처음이면 만든다.
+
+        새 전략이 나중에 합류해도 자신의 시작 시점부터 수익률이 계산된다.
+        """
+        with self._lock:
+            row = self._db.execute(
+                "SELECT * FROM paper_accounts WHERE strategy = ?", (strategy,)
+            ).fetchone()
+            if row is None:
+                self._db.execute(
+                    "INSERT INTO paper_accounts (strategy, start_equity, started_at, peak_equity)"
+                    " VALUES (?, ?, ?, ?)",
+                    (strategy, start_equity, now_ms, start_equity),
+                )
+                self._db.commit()
+                return {
+                    "strategy": strategy, "start_equity": start_equity,
+                    "started_at": now_ms, "peak_equity": start_equity,
+                }
+            return dict(row)
+
+    def update_paper_peak(self, strategy: str, peak_equity: float) -> None:
+        with self._lock:
+            self._db.execute(
+                "UPDATE paper_accounts SET peak_equity = ? WHERE strategy = ?",
+                (peak_equity, strategy),
+            )
+            self._db.commit()
+
+    def paper_accounts(self) -> list[dict[str, Any]]:
+        with self._lock:
+            return [dict(r) for r in self._db.execute("SELECT * FROM paper_accounts").fetchall()]
+
+    def save_paper_position(self, strategy: str, symbol: str, data: dict[str, Any]) -> None:
+        with self._lock:
+            self._db.execute(
+                "INSERT OR REPLACE INTO paper_positions (strategy, symbol, side, opened_at,"
+                " entry_price, amount, notional, stop_loss, entry_fee, conviction,"
+                " worst_excursion_pct) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (strategy, symbol, data["side"], data["opened_at"], data["entry_price"],
+                 data["amount"], data["notional"], data["stop_loss"], data["entry_fee"],
+                 data["conviction"], data.get("worst_excursion_pct", 0.0)),
+            )
+            self._db.commit()
+
+    def delete_paper_position(self, strategy: str, symbol: str) -> None:
+        with self._lock:
+            self._db.execute(
+                "DELETE FROM paper_positions WHERE strategy = ? AND symbol = ?",
+                (strategy, symbol),
+            )
+            self._db.commit()
+
+    def paper_positions(self) -> list[dict[str, Any]]:
+        with self._lock:
+            return [dict(r) for r in self._db.execute("SELECT * FROM paper_positions").fetchall()]
+
+    def record_paper_trade(self, trade: dict[str, Any]) -> None:
+        with self._lock:
+            self._db.execute(
+                "INSERT INTO paper_trades (strategy, symbol, side, opened_at, closed_at,"
+                " entry_price, exit_price, amount, notional, pnl, fee, exit_reason,"
+                " conviction, worst_excursion_pct)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (trade["strategy"], trade["symbol"], trade["side"], trade["opened_at"],
+                 trade["closed_at"], trade["entry_price"], trade["exit_price"],
+                 trade["amount"], trade["notional"], trade["pnl"], trade["fee"],
+                 trade["exit_reason"], trade["conviction"], trade.get("worst_excursion_pct", 0.0)),
+            )
+            self._db.commit()
+
+    def paper_trades(self, strategy: str | None = None, limit: int = 2000) -> list[dict[str, Any]]:
+        query = "SELECT * FROM paper_trades"
+        params: list[Any] = []
+        if strategy:
+            query += " WHERE strategy = ?"
+            params.append(strategy)
+        query += " ORDER BY closed_at DESC LIMIT ?"
+        params.append(limit)
+        with self._lock:
+            return [dict(r) for r in self._db.execute(query, params).fetchall()]
+
+    def reset_paper(self) -> None:
+        """모의매매 기록을 전부 지운다. 조건을 바꿔 다시 비교할 때 쓴다."""
+        with self._lock:
+            for table in ("paper_trades", "paper_positions", "paper_accounts"):
+                self._db.execute(f"DELETE FROM {table}")
+            self._db.commit()
 
     def close(self) -> None:
         with self._lock:

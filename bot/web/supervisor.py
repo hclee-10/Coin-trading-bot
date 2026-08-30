@@ -27,6 +27,7 @@ from bot.exchanges import create_exchange
 from bot.exchanges.base import FuturesExchange
 from bot.execution import Executor
 from bot.models import Position, Signal, SignalAction
+from bot.paper import PaperArena, StrategyStats
 from bot.performance import Performance, summarize
 from bot.risk import RiskManager
 from bot.store import Store
@@ -101,6 +102,9 @@ class BotSupervisor:
     ) -> None:
         self.config = config
         self.store = store
+        # 전략 경쟁 모의매매. 봇이 꺼져 있어도 순위표는 볼 수 있어야 하므로
+        # 여기서 만들어 들고 있는다.
+        self.arena = PaperArena(config, store) if store is not None else None
         self._exchange_factory = exchange_factory or (lambda: create_exchange(config.exchange))
         self._join_timeout = join_timeout
         self._lock = threading.Lock()
@@ -135,7 +139,9 @@ class BotSupervisor:
             if self.running:
                 raise SupervisorError("봇이 이미 실행 중입니다")
             exchange = self._exchange_factory()
-            engine = TradingEngine(self.config, exchange, dry_run=not live, store=self.store)
+            engine = TradingEngine(
+                self.config, exchange, dry_run=not live, store=self.store, arena=self.arena
+            )
             self._engine = engine
             self._live = live
             self._start_error = None
@@ -270,6 +276,22 @@ class BotSupervisor:
         except Exception:
             log.debug("%s 계약 크기 조회 실패", symbol, exc_info=True)
             return 1.0
+
+    def leaderboard(self) -> list[StrategyStats]:
+        """전략 경쟁 순위표. 봇이 꺼져 있어도 지금까지의 성적을 보여 준다."""
+        if self.arena is None:
+            return []
+        report = self._engine.last_report if self._engine else None
+        prices = {}
+        if report is not None:
+            for symbol, candles in report.candles.items():
+                if candles:
+                    prices[symbol] = candles[-1].close
+        return self.arena.leaderboard(prices)
+
+    def reset_paper(self) -> None:
+        if self.arena is not None:
+            self.arena.reset()
 
     def performance(self, symbol: str | None = None) -> Performance:
         """기록해 둔 체결과 자기자본으로 성과를 계산한다."""

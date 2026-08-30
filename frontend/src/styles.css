@@ -159,3 +159,10 @@ code {
   margin: 10px 0 0;
 }
 details summary::-webkit-details-marker { color: var(--muted); }
+
+.leaderboard th, .leaderboard td { padding: 9px 12px; font-size: 13px; }
+/* 전략 이름은 왼쪽으로 — 숫자만 오른쪽 정렬한다 */
+.leaderboard th:nth-child(2), .leaderboard td:nth-child(2) { text-align: left; }
+.leaderboard tbody tr:hover { background: var(--panel-2); }
+.leaderboard tr.active-strategy td { background: color-mix(in srgb, var(--accent) 10%, transparent); }
+.warn-text { color: var(--amber); }

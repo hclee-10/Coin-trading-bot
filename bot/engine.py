@@ -23,6 +23,7 @@ from bot.exchanges.base import ExchangeError, FuturesExchange
 from bot.execution import ExecutionResult, Executor
 from bot.models import Candle, Position, Signal, SignalAction
 from bot.risk import RiskManager
+from bot.paper import PaperArena
 from bot.store import Fill as StoredFill
 from bot.store import Store
 from bot.strategies import Strategy, StrategyContext, get_strategy
@@ -57,6 +58,7 @@ class TradingEngine:
         strategy: Strategy | None = None,
         store: Store | None = None,
         history_interval_sec: float = 60.0,
+        arena: PaperArena | None = None,
     ) -> None:
         self.config = config
         self.exchange = exchange
@@ -65,6 +67,10 @@ class TradingEngine:
         # 매번 하면 레이트리밋만 태운다.
         self.store = store
         self._history_interval = history_interval_sec
+        # 등록된 모든 전략을 동시에 모의매매로 굴린다. 실거래 전략이 무엇이든
+        # 나머지도 같은 시세를 보며 성적을 남겨, 지금 쓰는 게 제일 나은지
+        # 실시간 데이터로 판단할 수 있게 한다.
+        self.arena = arena
         # None = 아직 한 번도 동기화하지 않음. 0.0 으로 두면 부팅 직후처럼
         # monotonic() 이 작을 때 첫 동기화가 통째로 건너뛰어진다.
         self._last_history_sync: float | None = None
@@ -245,6 +251,15 @@ class TradingEngine:
             )
 
         ticker = self.exchange.fetch_ticker(symbol)
+
+        # 모의매매는 실거래 전략과 무관하게 항상 돈다. 여기서 터져도 실제 매매는
+        # 계속되어야 한다 — 비교용 기능이 본업을 막으면 안 된다.
+        if self.arena is not None:
+            try:
+                self.arena.step(symbol, candles, ticker)
+            except Exception:
+                log.exception("%s 모의매매 처리 실패 — 실거래는 계속합니다", symbol)
+
         ctx = StrategyContext(
             symbol=symbol,
             timeframe=self.config.trading.timeframe,

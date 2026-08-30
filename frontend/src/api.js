@@ -73,6 +73,9 @@ export const api = {
   chart: () => request('/api/chart'),
   performance: () => request('/api/performance'),
   strategies: () => request('/api/strategies'),
+  leaderboard: () => request('/api/leaderboard'),
+  resetLeaderboard: (confirm) =>
+    request('/api/leaderboard/reset', { method: 'POST', body: { confirm } }),
   start: (live, confirm) => request('/api/bot/start', { method: 'POST', body: { live, confirm } }),
   stop: () => request('/api/bot/stop', { method: 'POST' }),
   closeAll: (confirm) =>

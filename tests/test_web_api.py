@@ -910,3 +910,81 @@ def test_chart_falls_back_to_the_bot_cache_while_running(traded_env):
         assert len(body["candles"]) > 0
     finally:
         supervisor.stop()
+
+
+# --- 전략 경쟁 순위표 -----------------------------------------------------
+def test_leaderboard_lists_every_strategy(traded_env):
+    """새 전략이 추가되면 자동으로 합류해야 한다."""
+    client, supervisor, _ = traded_env
+    headers = login(client)
+    supervisor.start(live=False)
+    try:
+        assert wait_for(lambda: supervisor.snapshot().last_cycle_at is not None)
+        body = client.get("/api/leaderboard", headers=headers).json()
+    finally:
+        supervisor.stop()
+
+    names = {s["name"] for s in body["strategies"]}
+    assert len(names) >= 10
+    assert "ema_cross" in names and "grid" in names
+    assert body["active"] == "hold"
+
+
+def test_leaderboard_rows_carry_every_metric(traded_env):
+    client, supervisor, _ = traded_env
+    headers = login(client)
+    supervisor.start(live=False)
+    try:
+        assert wait_for(lambda: supervisor.snapshot().last_cycle_at is not None)
+        body = client.get("/api/leaderboard", headers=headers).json()
+    finally:
+        supervisor.stop()
+
+    required = {
+        "return_pct", "net_pnl", "trade_count", "win_rate", "stop_out_rate",
+        "liquidation_risk_pct", "max_drawdown_pct", "open_positions", "started_at",
+    }
+    assert required <= set(body["strategies"][0])
+
+
+def test_leaderboard_reset_requires_confirmation(traded_env):
+    client, *_ = traded_env
+    headers = login(client)
+
+    response = client.post("/api/leaderboard/reset", json={}, headers=headers)
+
+    assert response.status_code == 400
+    assert "RESET" in response.json()["detail"]
+
+
+def test_leaderboard_reset_clears_records(traded_env):
+    client, supervisor, store = traded_env
+    headers = login(client)
+    supervisor.start(live=False)
+    try:
+        assert wait_for(lambda: supervisor.snapshot().last_cycle_at is not None)
+    finally:
+        supervisor.stop()
+
+    response = client.post(
+        "/api/leaderboard/reset", json={"confirm": "RESET"}, headers=headers
+    )
+
+    assert response.status_code == 200
+    assert store.paper_accounts() == []
+
+
+def test_strategies_endpoint_carries_the_algorithm(env):
+    """전략 상세에 실제 규칙이 있어야 왜 진입했는지 알 수 있다."""
+    client, *_ = env
+    body = client.get("/api/strategies", headers=login(client)).json()
+
+    for entry in body["strategies"]:
+        assert len(entry["algorithm"]) > 200, entry["name"]
+        assert "진입" in entry["algorithm"] and "손절" in entry["algorithm"]
+
+
+@pytest.mark.parametrize("path", ["/api/leaderboard"])
+def test_leaderboard_requires_auth(env, path):
+    client, *_ = env
+    assert client.get(path).status_code == 401

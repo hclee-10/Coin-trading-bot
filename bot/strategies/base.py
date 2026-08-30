@@ -46,6 +46,9 @@ class Strategy(ABC):
     # 대시보드와 `python -m bot strategies` 에 그대로 표시된다.
     summary: str = ""
     description: str = ""
+    # 실제 규칙. 왜 되는지(description)와 별개로, 코드가 무엇을 하는지를
+    # 진입/청산/손절/확신도 순으로 구체적으로 적는다.
+    algorithm: str = ""
     # trend | reversion | breakout | combo | range
     category: str = "other"
 
@@ -104,6 +107,7 @@ def strategy_catalog() -> list[dict[str, str]]:
             "category": cls.category,
             "summary": cls.summary,
             "description": (cls.description or "").strip(),
+            "algorithm": (cls.algorithm or "").strip(),
         }
         for name, cls in sorted(_REGISTRY.items())
     ]

@@ -286,6 +286,55 @@ def create_app(
         catalog = [e for e in strategy_catalog() if e["summary"]]
         return {"active": config.strategy.name, "strategies": catalog}
 
+    @app.get("/api/leaderboard")
+    def get_leaderboard(_: str = Depends(require_auth)) -> dict:
+        """전략 경쟁 순위표. 모든 전략이 같은 시세로 모의매매한 결과다."""
+        rows = supervisor.leaderboard()
+        return {
+            "active": config.strategy.name,
+            "leverage": config.exchange.leverage,
+            "strategies": [
+                {
+                    "name": s.name,
+                    "summary": s.summary,
+                    "category": s.category,
+                    "started_at": s.started_at,
+                    "return_pct": s.return_pct,
+                    "net_pnl": s.net_pnl,
+                    "equity": s.equity,
+                    "start_equity": s.start_equity,
+                    "unrealized": s.unrealized,
+                    "open_positions": s.open_positions,
+                    "trade_count": s.trade_count,
+                    "wins": s.wins,
+                    "losses": s.losses,
+                    "win_rate": s.win_rate,
+                    "stop_outs": s.stop_outs,
+                    "stop_out_rate": s.stop_out_rate,
+                    "max_drawdown_pct": s.max_drawdown_pct,
+                    "liquidation_risk_pct": s.liquidation_risk_pct,
+                    "total_fee": s.total_fee,
+                    "best_pnl": s.best_pnl,
+                    "worst_pnl": s.worst_pnl,
+                    "error": s.error,
+                }
+                for s in rows
+            ],
+        }
+
+    @app.post("/api/leaderboard/reset")
+    def reset_leaderboard(body: CloseAllRequest, request: Request,
+                          _: str = Depends(require_auth)) -> dict:
+        """모의매매 기록을 지우고 처음부터 다시 비교한다."""
+        if body.confirm != "RESET":
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="모의매매 기록을 지우려면 확인 문구 'RESET' 이 필요합니다",
+            )
+        log.warning("모의매매 기록 초기화 — ip=%s", client_ip(request))
+        supervisor.reset_paper()
+        return {"ok": True}
+
     @app.get("/api/chart")
     def get_chart(symbol: str | None = None, _: str = Depends(require_auth)) -> dict:
         """캔들과 내 체결 지점. 차트에 매수/매도를 표시하는 데 쓴다."""

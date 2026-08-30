@@ -344,6 +344,9 @@ def _cmd_strategy_detail(name: str) -> int:
         if entry["name"] == name:
             print(f"\n{entry['name']} — {entry['summary']}\n")
             print(entry["description"] or "(설명 없음)")
+            if entry["algorithm"]:
+                print("\n--- 알고리즘 ---")
+                print(entry["algorithm"])
             print()
             return 0
     print(f"'{name}' 전략을 찾을 수 없습니다.", file=sys.stderr)

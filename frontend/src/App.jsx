@@ -7,6 +7,7 @@ import Positions from './components/Positions.jsx'
 import Chart from './components/Chart.jsx'
 import Performance from './components/Performance.jsx'
 import StrategyInfo from './components/StrategyInfo.jsx'
+import Leaderboard from './components/Leaderboard.jsx'
 import Logs from './components/Logs.jsx'
 
 const POLL_MS = 2000
@@ -24,6 +25,7 @@ export default function App() {
   const [performance, setPerformance] = useState(null)
   const [catalog, setCatalog] = useState(null)
   const [stale, setStale] = useState(false)
+  const [leaderboard, setLeaderboard] = useState(null)
   const [logs, setLogs] = useState([])
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
@@ -68,6 +70,7 @@ export default function App() {
       api.logs(logSeq.current).then(applyLogs),
       api.chart().then(setChart),
       api.performance().then(setPerformance),
+      api.leaderboard().then(setLeaderboard),
     ])
 
     const failures = results.filter((r) => r.status === 'rejected')
@@ -205,6 +208,13 @@ export default function App() {
         timeframe={chart?.timeframe || status.timeframe}
         candles={chart?.candles}
         markers={chart?.markers}
+      />
+
+      <Leaderboard
+        data={leaderboard}
+        catalog={catalog}
+        busy={busy}
+        onReset={(confirm) => act(() => api.resetLeaderboard(confirm))}
       />
 
       <StrategyInfo catalog={catalog} />
