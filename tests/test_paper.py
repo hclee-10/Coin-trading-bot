@@ -238,3 +238,29 @@ def test_leaderboard_is_sorted_by_return():
 
     names = [s.name for s in arena.leaderboard()]
     assert names[0] == "good"
+
+
+def test_unrealized_includes_the_round_trip_fee():
+    """보유 중인 포지션도 왕복 수수료를 반영해야 순위 비교가 공정하다."""
+    from bot.models import PositionSide
+    from bot.paper import PaperPosition
+
+    position = PaperPosition(
+        symbol="BTC/USDT:USDT",
+        side=PositionSide.LONG,
+        opened_at=0,
+        entry_price=100.0,
+        amount=1.0,
+        notional=100.0,
+        stop_loss=99.0,
+        entry_fee=0.05,          # 진입 때 이미 낸 0.05%
+        conviction=0.5,
+    )
+
+    # 가격이 그대로면 총손익은 0 이지만, 지금 닫으면 왕복 수수료만큼 손해다
+    assert position.unrealized(100.0) == 0.0
+    assert position.unrealized_net(100.0, 0.0005) == pytest.approx(-0.10)
+
+    # 오른 경우에도 수수료가 빠진다
+    assert position.unrealized(101.0) == pytest.approx(1.0)
+    assert position.unrealized_net(101.0, 0.0005) == pytest.approx(1.0 - 0.05 - 0.0505)

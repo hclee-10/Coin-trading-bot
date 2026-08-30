@@ -93,6 +93,7 @@ export default function Leaderboard({ data, catalog, onReset, busy, storage }) {
                 <th>전략</th>
                 <th>수익률</th>
                 <th>수익금액</th>
+                <th>수수료</th>
                 <th>거래</th>
                 <th>승률</th>
                 <th>손절률</th>
@@ -123,6 +124,9 @@ export default function Leaderboard({ data, catalog, onReset, busy, storage }) {
                       <strong>{signed(s.return_pct)}%</strong>
                     </td>
                     <td className={s.net_pnl >= 0 ? 'pos' : 'neg'}>{signed(s.net_pnl)}</td>
+                    {/* 누적 수수료. 회전이 잦은 전략이 얼마를 갈아 넣고 있는지가
+                        수익률만 봐서는 안 보인다. */}
+                    <td className="hint">-{s.total_fee.toFixed(2)}</td>
                     <td>{s.trade_count}</td>
                     <td>{pct(s.win_rate, 0)}</td>
                     <td>{pct(s.stop_out_rate, 0)}</td>
@@ -134,7 +138,7 @@ export default function Leaderboard({ data, catalog, onReset, busy, storage }) {
                   </tr>
                   {expanded === s.name && (
                     <tr>
-                      <td colSpan={10} style={{ textAlign: 'left', padding: 0 }}>
+                      <td colSpan={11} style={{ textAlign: 'left', padding: 0 }}>
                         <div className="strategy-detail" style={{ margin: '0 16px 14px' }}>
                           <strong>{s.summary}</strong>
                           {s.error && (

@@ -51,6 +51,16 @@ class PaperPosition:
         direction = 1 if self.side is PositionSide.LONG else -1
         return (price - self.entry_price) * self.amount * direction
 
+    def unrealized_net(self, price: float, taker_fee: float) -> float:
+        """지금 닫으면 실제로 손에 남는 금액.
+
+        이미 낸 진입 수수료와 닫을 때 낼 수수료를 뺀다. 이것을 빼지 않으면
+        보유 중인 전략의 성적만 왕복 수수료만큼 좋아 보이고, 그래서 순위표에서
+        회전이 잦은 전략이 실제보다 유리하게 보인다.
+        """
+        exit_fee = abs(price * self.amount) * taker_fee
+        return self.unrealized(price) - self.entry_fee - exit_fee
+
     def excursion_pct(self, price: float) -> float:
         """진입가 대비 불리한 쪽으로 얼마나 갔는지(%). 유리하면 0."""
         direction = 1 if self.side is PositionSide.LONG else -1
@@ -248,7 +258,7 @@ class PaperArena:
         # 이번 주기에 닫힌 거래만 더하면 되지만, 정확성을 위해 다시 읽는다 —
         # 주기가 15초라 비용보다 정확성이 중요하다.
         marked = self._equity(name, account) + sum(
-            p.unrealized(price)
+            p.unrealized_net(price, self.taker_fee)
             for (owner, _), p in self._positions.items()
             if owner == name
         )
@@ -357,7 +367,8 @@ class PaperArena:
             ]
             stats.open_positions = len(open_positions)
             stats.unrealized = sum(
-                p.unrealized(prices.get(p.symbol, p.entry_price)) for p in open_positions
+                p.unrealized_net(prices.get(p.symbol, p.entry_price), self.taker_fee)
+                for p in open_positions
             )
 
             peak = max(account["peak_equity"], stats.equity + stats.unrealized)
