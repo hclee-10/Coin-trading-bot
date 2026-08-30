@@ -23,7 +23,15 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 
 from bot.config import Config
-from bot.models import Candle, Position, PositionSide, Signal, SignalAction, Ticker
+from bot.models import (
+    Candle,
+    FundingRate,
+    Position,
+    PositionSide,
+    Signal,
+    SignalAction,
+    Ticker,
+)
 from bot.risk import RiskManager
 from bot.store import Store
 from bot.strategies import Strategy, StrategyContext, get_strategy, strategy_catalog
@@ -32,6 +40,11 @@ log = logging.getLogger(__name__)
 
 DEFAULT_START_EQUITY = 10_000.0
 TAKER_FEE = 0.0005   # 0.05% — 모의매매는 항상 불리한 쪽으로 잡는다
+
+# 거래소가 펀딩비율을 알려 주지 않을 때 쓰는 값. 이때는 방향과 무관하게 항상
+# 비용으로 잡는다 — 모르는 값을 수입으로 계산해 성적이 좋아 보이면 안 된다.
+DEFAULT_FUNDING_RATE = 0.0001   # 0.01% / 8시간 (하루 0.03%)
+DEFAULT_FUNDING_INTERVAL_HOURS = 8.0
 
 
 @dataclass
@@ -46,6 +59,8 @@ class PaperPosition:
     entry_fee: float
     conviction: float
     worst_excursion_pct: float = 0.0   # 진입가 대비 최대 역행폭(%)
+    funding_paid: float = 0.0          # 보유하는 동안 낸 펀딩비 누계(수입이면 음수)
+    next_funding_ms: int = 0           # 다음 정산 시각 (0 = 아직 정하지 않음)
 
     def unrealized(self, price: float) -> float:
         direction = 1 if self.side is PositionSide.LONG else -1
@@ -54,12 +69,13 @@ class PaperPosition:
     def unrealized_net(self, price: float, taker_fee: float) -> float:
         """지금 닫으면 실제로 손에 남는 금액.
 
-        이미 낸 진입 수수료와 닫을 때 낼 수수료를 뺀다. 이것을 빼지 않으면
-        보유 중인 전략의 성적만 왕복 수수료만큼 좋아 보이고, 그래서 순위표에서
-        회전이 잦은 전략이 실제보다 유리하게 보인다.
+        이미 낸 진입 수수료와 닫을 때 낼 수수료, 그리고 보유하는 동안 정산된
+        펀딩비까지 뺀다. 이것을 빼지 않으면 보유 중인 전략의 성적만 좋아 보이고,
+        그래서 순위표에서 회전이 잦은 전략과 오래 들고 가는 전략이 둘 다 실제보다
+        유리하게 나온다.
         """
         exit_fee = abs(price * self.amount) * taker_fee
-        return self.unrealized(price) - self.entry_fee - exit_fee
+        return self.unrealized(price) - self.entry_fee - exit_fee - self.funding_paid
 
     def excursion_pct(self, price: float) -> float:
         """진입가 대비 불리한 쪽으로 얼마나 갔는지(%). 유리하면 0."""
@@ -85,6 +101,7 @@ class StrategyStats:
     losses: int = 0
     stop_outs: int = 0
     total_fee: float = 0.0
+    total_funding: float = 0.0   # 보유하는 동안 낸 펀딩비 (수입이면 음수)
     best_pnl: float = 0.0
     worst_pnl: float = 0.0
     max_drawdown_pct: float = 0.0
@@ -161,6 +178,12 @@ class PaperArena:
                 entry_fee=row["entry_fee"],
                 conviction=row["conviction"],
                 worst_excursion_pct=row["worst_excursion_pct"],
+                # 예전 DB 에는 없던 열이다. 마이그레이션으로 채워지지만
+                # 안전하게 기본값을 둔다.
+                funding_paid=row["funding_paid"] if "funding_paid" in row.keys() else 0.0,
+                next_funding_ms=(
+                    row["next_funding_ms"] if "next_funding_ms" in row.keys() else 0
+                ),
             )
         log.info(
             "모의매매 준비 — 전략 %d개, 진행 중인 가상 포지션 %d개",
@@ -172,7 +195,13 @@ class PaperArena:
         return sorted(self._strategies)
 
     # ------------------------------------------------------------------
-    def step(self, symbol: str, candles: list[Candle], ticker: Ticker) -> None:
+    def step(
+        self,
+        symbol: str,
+        candles: list[Candle],
+        ticker: Ticker,
+        funding: FundingRate | None = None,
+    ) -> None:
         """한 주기. 모든 전략에 같은 시세를 먹인다.
 
         전략 하나가 터져도 나머지는 계속 굴러야 한다 — 비교가 목적이므로 한
@@ -181,7 +210,7 @@ class PaperArena:
         now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
         for name, strategy in self._strategies.items():
             try:
-                self._step_one(name, strategy, symbol, candles, ticker, now_ms)
+                self._step_one(name, strategy, symbol, candles, ticker, now_ms, funding)
                 self._errors.pop(name, None)
             except Exception as exc:
                 self._errors[name] = str(exc)
@@ -195,6 +224,7 @@ class PaperArena:
         candles: list[Candle],
         ticker: Ticker,
         now_ms: int,
+        funding: FundingRate | None = None,
     ) -> None:
         account = self.store.paper_account(
             name, start_equity=self.start_equity, now_ms=now_ms
@@ -202,7 +232,12 @@ class PaperArena:
         position = self._positions.get((name, symbol))
         price = ticker.last
 
-        # 1) 손절 확인. 폴링 사이에 스쳤을 수 있으므로 진행 중인 봉의 저가/고가까지 본다.
+        # 1) 펀딩비 정산. 정산 시각을 지났으면 손절을 보기 전에 먼저 반영한다 —
+        #    실제 거래소도 보유 중인 포지션에 그대로 부과한다.
+        if position is not None:
+            self._settle_funding(name, position, price, now_ms, funding)
+
+        # 2) 손절 확인. 폴링 사이에 스쳤을 수 있으므로 진행 중인 봉의 저가/고가까지 본다.
         if position is not None:
             worst = price
             if candles:
@@ -219,7 +254,7 @@ class PaperArena:
                 self._close(name, position, position.stop_loss, now_ms, "stop")
                 position = None
 
-        # 2) 전략 판단
+        # 3) 전략 판단
         equity = self._equity(name, account)
         model_position = (
             Position(
@@ -241,7 +276,7 @@ class PaperArena:
             )
         )
 
-        # 3) 체결
+        # 4) 체결
         if position is not None:
             if signal.action is SignalAction.EXIT:
                 self._close(name, position, price, now_ms, "signal")
@@ -264,6 +299,71 @@ class PaperArena:
         )
         if marked > account["peak_equity"]:
             self.store.update_paper_peak(name, marked)
+
+    # ------------------------------------------------------------------
+    def _settle_funding(
+        self,
+        name: str,
+        position: PaperPosition,
+        price: float,
+        now_ms: int,
+        funding: FundingRate | None,
+    ) -> None:
+        """정산 시각을 지났으면 펀딩비를 부과한다.
+
+        실제 거래소와 같은 방식으로 **8시간마다 한 번씩만** 부과한다. 보유 시간에
+        비례해 조금씩 떼면 정산 시각을 넘기지 않은 짧은 매매까지 비용을 무는데,
+        그건 실제로는 내지 않는 돈이다.
+
+        비율이 양수면 롱이 숏에게 낸다. 거래소가 비율을 알려 주지 않으면 방향과
+        무관하게 기본값을 비용으로 잡는다 — 모르는 값을 수입으로 계산해 성적이
+        좋아 보이는 쪽이 훨씬 위험하다.
+        """
+        interval_ms = int(
+            (funding.interval_hours if funding else DEFAULT_FUNDING_INTERVAL_HOURS)
+            * 3_600_000
+        )
+        if interval_ms <= 0:
+            return
+
+        # 진입 시각보다 이른 정산 시각은 있을 수 없다 — 아직 정하지 않았거나
+        # (0) 값이 망가진 경우다. 그대로 두면 아래 루프가 1970년부터 밀린 것으로
+        # 계산해 터무니없는 금액을 문다.
+        if position.next_funding_ms <= position.opened_at:
+            position.next_funding_ms = self._next_funding_ms(now_ms, interval_ms, funding)
+            self._save_position(name, position)
+            return
+
+        charged = 0.0
+        # 봇이 오래 멈춰 있었다면 여러 번 밀려 있을 수 있다. 밀린 만큼 전부 문다.
+        while now_ms >= position.next_funding_ms:
+            notional = abs(price * position.amount)
+            if funding is not None:
+                direction = 1.0 if position.side is PositionSide.LONG else -1.0
+                charged += funding.rate * notional * direction
+            else:
+                charged += DEFAULT_FUNDING_RATE * notional
+            position.next_funding_ms += interval_ms
+
+        if charged == 0.0:
+            return
+        position.funding_paid += charged
+        self._save_position(name, position)
+        log.debug(
+            "모의매매 '%s' 펀딩비 %.4f 정산 (누계 %.4f)",
+            name, charged, position.funding_paid,
+        )
+
+    @staticmethod
+    def _next_funding_ms(
+        now_ms: int, interval_ms: int, funding: FundingRate | None
+    ) -> int:
+        """다음 정산 시각. 거래소가 알려 주면 그 값을, 아니면 8시간 경계를 쓴다."""
+        if funding is not None and funding.next_time_ms:
+            if funding.next_time_ms > now_ms:
+                return int(funding.next_time_ms)
+        # epoch 기준 8시간 경계는 UTC 00/08/16시와 정확히 맞는다.
+        return ((now_ms // interval_ms) + 1) * interval_ms
 
     # ------------------------------------------------------------------
     def _open(
@@ -289,12 +389,19 @@ class PaperArena:
             conviction=signal.strength,
         )
         self._positions[(name, symbol)] = position
-        self.store.save_paper_position(name, symbol, {
+        # next_funding_ms 는 다음 주기의 _settle_funding 이 채운다. 방금 연
+        # 포지션은 아직 정산 시각을 지나지 않았으므로 그래도 된다.
+        self._save_position(name, position)
+
+    def _save_position(self, name: str, position: PaperPosition) -> None:
+        self.store.save_paper_position(name, position.symbol, {
             "side": position.side.value, "opened_at": position.opened_at,
             "entry_price": position.entry_price, "amount": position.amount,
             "notional": position.notional, "stop_loss": position.stop_loss,
             "entry_fee": position.entry_fee, "conviction": position.conviction,
-            "worst_excursion_pct": 0.0,
+            "worst_excursion_pct": position.worst_excursion_pct,
+            "funding_paid": position.funding_paid,
+            "next_funding_ms": position.next_funding_ms,
         })
 
     def _close(
@@ -312,8 +419,9 @@ class PaperArena:
             "exit_price": price,
             "amount": position.amount,
             "notional": position.notional,
-            "pnl": gross - exit_fee - position.entry_fee,
+            "pnl": gross - exit_fee - position.entry_fee - position.funding_paid,
             "fee": exit_fee + position.entry_fee,
+            "funding": position.funding_paid,
             "exit_reason": reason,
             "conviction": position.conviction,
             "worst_excursion_pct": max(
@@ -357,6 +465,7 @@ class PaperArena:
                 losses=sum(1 for t in trades if t["pnl"] <= 0),
                 stop_outs=sum(1 for t in trades if t["exit_reason"] == "stop"),
                 total_fee=sum(t["fee"] for t in trades),
+                total_funding=sum(t["funding"] for t in trades),
                 best_pnl=max((t["pnl"] for t in trades), default=0.0),
                 worst_pnl=min((t["pnl"] for t in trades), default=0.0),
                 error=self._errors.get(name),

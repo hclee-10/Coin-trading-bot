@@ -264,3 +264,146 @@ def test_unrealized_includes_the_round_trip_fee():
     # 오른 경우에도 수수료가 빠진다
     assert position.unrealized(101.0) == pytest.approx(1.0)
     assert position.unrealized_net(101.0, 0.0005) == pytest.approx(1.0 - 0.05 - 0.0505)
+
+
+# --- 펀딩비 --------------------------------------------------------------
+HOUR_MS = 3_600_000
+
+
+def long_position(arena_obj=None, action=SignalAction.ENTER_LONG, **kwargs):
+    """전략 하나로 포지션을 하나 연 뒤, (아레나, 포지션) 을 돌려준다."""
+    arena = arena_obj or arena_with(
+        {"s": Scripted("s", [Signal(action=action, strength=0.25)])}, **kwargs
+    )
+    arena.step(SYMBOL, bars(100.0), tick(100.0))
+    return arena, arena._positions[("s", SYMBOL)]
+
+
+def test_funding_is_only_charged_after_a_settlement_time_passes():
+    """보유 시간에 비례해 조금씩 떼면 실제로는 내지 않는 돈을 물게 된다."""
+    from bot.models import FundingRate
+
+    arena, position = long_position()
+    opened = position.opened_at
+    funding = FundingRate(symbol=SYMBOL, rate=0.0001, next_time_ms=opened + HOUR_MS)
+
+    # 첫 호출은 다음 정산 시각만 정하고 아무것도 물리지 않는다
+    arena._settle_funding("s", position, 100.0, opened, funding)
+    assert position.funding_paid == 0.0
+    assert position.next_funding_ms == opened + HOUR_MS
+
+    # 정산 시각 이전이면 여전히 0
+    arena._settle_funding("s", position, 100.0, opened + HOUR_MS - 1, funding)
+    assert position.funding_paid == 0.0
+
+    # 정산 시각을 지나면 한 번 부과된다
+    arena._settle_funding("s", position, 100.0, opened + HOUR_MS, funding)
+    assert position.funding_paid == pytest.approx(0.0001 * 100.0 * position.amount)
+
+
+def test_a_positive_funding_rate_costs_longs_and_pays_shorts():
+    from bot.models import FundingRate, PositionSide
+
+    arena, position = long_position(action=SignalAction.ENTER_SHORT)
+    assert position.side is PositionSide.SHORT
+    opened = position.opened_at
+
+    funding = FundingRate(symbol=SYMBOL, rate=0.0001, next_time_ms=opened + HOUR_MS)
+    arena._settle_funding("s", position, 100.0, opened, funding)
+    arena._settle_funding("s", position, 100.0, opened + HOUR_MS, funding)
+    # 숏은 받는다 — 비용이 음수
+    assert position.funding_paid < 0
+
+
+def test_an_unknown_funding_rate_is_always_a_cost():
+    """모르는 값을 수입으로 잡아 성적이 좋아 보이면 판단이 어긋난다."""
+    for action in (SignalAction.ENTER_LONG, SignalAction.ENTER_SHORT):
+        arena, position = long_position(action=action)
+        opened = position.opened_at
+        arena._settle_funding("s", position, 100.0, opened, None)
+        arena._settle_funding("s", position, 100.0, opened + 9 * HOUR_MS, None)
+        assert position.funding_paid > 0, position.side
+
+
+def test_missed_settlements_are_all_charged_when_the_bot_was_down():
+    from bot.models import FundingRate
+
+    arena, position = long_position()
+    opened = position.opened_at
+    funding = FundingRate(symbol=SYMBOL, rate=0.0001, next_time_ms=opened + HOUR_MS)
+
+    arena._settle_funding("s", position, 100.0, opened, funding)
+    # 24시간 넘게 자고 일어났다 — 8시간 간격이므로 여러 번 밀려 있다
+    arena._settle_funding("s", position, 100.0, opened + 24 * HOUR_MS, funding)
+    expected = 3 * 0.0001 * 100.0 * position.amount   # 1h, 9h, 17h 정산분
+    assert position.funding_paid == pytest.approx(expected)
+
+
+def test_a_corrupt_settlement_time_does_not_charge_decades_of_funding():
+    """진입 시각보다 이른 정산 시각은 있을 수 없다. 그대로 두면 1970년부터
+    밀린 것으로 계산해 터무니없는 금액을 문다."""
+    from bot.models import FundingRate
+
+    arena, position = long_position()
+    position.next_funding_ms = HOUR_MS          # 1970년 값
+    funding = FundingRate(symbol=SYMBOL, rate=0.0001, next_time_ms=None)
+
+    arena._settle_funding("s", position, 100.0, position.opened_at, funding)
+    assert position.funding_paid == 0.0
+    assert position.next_funding_ms > position.opened_at
+
+
+def test_funding_lands_in_the_closed_trade_and_the_leaderboard():
+    from bot.models import FundingRate
+
+    arena = arena_with({
+        "s": Scripted("s", [
+            Signal(action=SignalAction.ENTER_LONG, strength=0.25),
+            Signal(action=SignalAction.EXIT),
+        ])
+    })
+    arena.step(SYMBOL, bars(100.0), tick(100.0))
+    position = arena._positions[("s", SYMBOL)]
+    opened = position.opened_at
+
+    funding = FundingRate(symbol=SYMBOL, rate=0.001, next_time_ms=opened + HOUR_MS)
+    arena._settle_funding("s", position, 100.0, opened, funding)
+    arena._settle_funding("s", position, 100.0, opened + HOUR_MS, funding)
+    charged = position.funding_paid
+    assert charged > 0
+
+    arena.step(SYMBOL, bars(100.0), tick(100.0))   # 청산
+    stats = {s.name: s for s in arena.leaderboard({SYMBOL: 100.0})}["s"]
+    assert stats.total_funding == pytest.approx(charged)
+    # 가격이 그대로여도 펀딩비만큼 손해다 (수수료는 이 테스트에서 0)
+    assert stats.net_pnl == pytest.approx(-charged)
+
+
+def test_open_positions_show_funding_in_their_unrealized_value():
+    from bot.models import FundingRate
+
+    arena, position = long_position()
+    opened = position.opened_at
+    funding = FundingRate(symbol=SYMBOL, rate=0.001, next_time_ms=opened + HOUR_MS)
+    arena._settle_funding("s", position, 100.0, opened, funding)
+    arena._settle_funding("s", position, 100.0, opened + HOUR_MS, funding)
+
+    stats = {s.name: s for s in arena.leaderboard({SYMBOL: 100.0})}["s"]
+    assert stats.unrealized == pytest.approx(-position.funding_paid)
+
+
+def test_funding_survives_a_restart():
+    """재시작해도 이미 낸 펀딩비를 다시 물거나 잊어버리면 안 된다."""
+    from bot.models import FundingRate
+
+    store = Store(None)
+    arena, position = long_position(store=store)
+    opened = position.opened_at
+    funding = FundingRate(symbol=SYMBOL, rate=0.001, next_time_ms=opened + HOUR_MS)
+    arena._settle_funding("s", position, 100.0, opened, funding)
+    arena._settle_funding("s", position, 100.0, opened + HOUR_MS, funding)
+
+    revived = arena_with({"s": Scripted("s", [])}, store=store)
+    restored = revived._positions[("s", SYMBOL)]
+    assert restored.funding_paid == pytest.approx(position.funding_paid)
+    assert restored.next_funding_ms == position.next_funding_ms

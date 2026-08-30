@@ -103,3 +103,55 @@ def test_margin_mode_call_is_skipped_where_unsupported():
     """Gate 에는 마진 모드 전용 API 가 없다 — 호출하면 매번 경고만 남는다."""
     assert make("gate")._ex.has.get("setMarginMode") is False
     assert make("bitget")._ex.has.get("setMarginMode") is True
+
+
+# --- 펀딩비 --------------------------------------------------------------
+class _FakeCcxt:
+    """fetch_funding_rate 만 흉내 내는 최소한의 가짜 ccxt 객체."""
+
+    def __init__(self, payload=None, *, supported=True, raises=None):
+        self.has = {"fetchFundingRate": supported}
+        self.options = {}
+        self._payload = payload or {}
+        self._raises = raises
+
+    def fetch_funding_rate(self, symbol):
+        if self._raises:
+            raise self._raises
+        return dict(self._payload, symbol=symbol)
+
+
+def _exchange_with(fake):
+    ex = CcxtFuturesExchange.__new__(CcxtFuturesExchange)
+    ex._ex = fake
+    ex.id = "gate"
+    ex._markets_loaded = True
+    ex._call = lambda fn, *a, **kw: fn(*a, **kw)
+    ex._require_markets = lambda: None
+    return ex
+
+
+def test_funding_rate_is_parsed_with_its_settlement_time():
+    ex = _exchange_with(_FakeCcxt({
+        "fundingRate": 0.0001,
+        "fundingTimestamp": 1_700_000_000_000,
+        "interval": "8h",
+    }))
+    rate = ex.fetch_funding_rate("BTC/USDT:USDT")
+    assert rate.rate == 0.0001
+    assert rate.next_time_ms == 1_700_000_000_000
+    assert rate.interval_hours == 8.0
+
+
+def test_a_four_hour_funding_interval_is_read_correctly():
+    """일부 종목은 4시간마다 정산한다. 8시간으로 넘겨짚으면 절반만 문다."""
+    ex = _exchange_with(_FakeCcxt({"fundingRate": 0.0002, "interval": "4h"}))
+    assert ex.fetch_funding_rate("BTC/USDT:USDT").interval_hours == 4.0
+
+
+def test_an_unsupported_or_failing_funding_call_returns_none_not_an_error():
+    """펀딩비는 부가 정보다. 이것 때문에 매매 주기가 통째로 실패하면 안 된다."""
+    assert _exchange_with(_FakeCcxt(supported=False)).fetch_funding_rate("X") is None
+
+    boom = _exchange_with(_FakeCcxt(raises=RuntimeError("거래소 장애")))
+    assert boom.fetch_funding_rate("X") is None

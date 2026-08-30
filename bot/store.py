@@ -59,6 +59,7 @@ CREATE TABLE IF NOT EXISTS paper_trades (
     notional     REAL NOT NULL,
     pnl          REAL NOT NULL,
     fee          REAL NOT NULL,
+    funding      REAL NOT NULL DEFAULT 0,   -- 보유 기간에 정산된 펀딩비(비용은 양수)
     exit_reason  TEXT NOT NULL,          -- signal | stop | reverse
     conviction   REAL NOT NULL,
     worst_excursion_pct REAL NOT NULL DEFAULT 0  -- 청산가까지 얼마나 갔는지
@@ -78,9 +79,19 @@ CREATE TABLE IF NOT EXISTS paper_positions (
     entry_fee    REAL NOT NULL,
     conviction   REAL NOT NULL,
     worst_excursion_pct REAL NOT NULL DEFAULT 0,
+    funding_paid REAL NOT NULL DEFAULT 0,      -- 지금까지 낸 펀딩비 누계
+    next_funding_ms INTEGER NOT NULL DEFAULT 0, -- 다음 정산 시각 (0 = 아직 모름)
     PRIMARY KEY (strategy, symbol)
 );
 """
+
+# 이미 만들어진 DB 에 나중에 추가된 열들. CREATE TABLE IF NOT EXISTS 는 기존
+# 테이블을 건드리지 않으므로, 볼륨에 쌓인 기록을 지우지 않고 열만 덧붙인다.
+_MIGRATIONS: tuple[tuple[str, str, str], ...] = (
+    ("paper_trades", "funding", "REAL NOT NULL DEFAULT 0"),
+    ("paper_positions", "funding_paid", "REAL NOT NULL DEFAULT 0"),
+    ("paper_positions", "next_funding_ms", "INTEGER NOT NULL DEFAULT 0"),
+)
 
 
 @dataclass(frozen=True)
@@ -138,7 +149,19 @@ class Store:
         self._db = connection
         with self._lock:
             self._db.executescript(_SCHEMA)
+            self._migrate()
             self._db.commit()
+
+    def _migrate(self) -> None:
+        """기존 DB 에 빠진 열을 채운다. 락은 호출하는 쪽에서 잡는다."""
+        for table, column, ddl in _MIGRATIONS:
+            existing = {
+                row["name"] for row in self._db.execute(f"PRAGMA table_info({table})")
+            }
+            if column in existing:
+                continue
+            self._db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
+            log.info("기록 DB 갱신 — %s.%s 열을 추가했습니다", table, column)
 
     # ------------------------------------------------------------------
     def record_fills(self, fills: Iterable[Fill]) -> int:
@@ -258,10 +281,12 @@ class Store:
             self._db.execute(
                 "INSERT OR REPLACE INTO paper_positions (strategy, symbol, side, opened_at,"
                 " entry_price, amount, notional, stop_loss, entry_fee, conviction,"
-                " worst_excursion_pct) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                " worst_excursion_pct, funding_paid, next_funding_ms)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (strategy, symbol, data["side"], data["opened_at"], data["entry_price"],
                  data["amount"], data["notional"], data["stop_loss"], data["entry_fee"],
-                 data["conviction"], data.get("worst_excursion_pct", 0.0)),
+                 data["conviction"], data.get("worst_excursion_pct", 0.0),
+                 data.get("funding_paid", 0.0), data.get("next_funding_ms", 0)),
             )
             self._db.commit()
 
@@ -281,13 +306,14 @@ class Store:
         with self._lock:
             self._db.execute(
                 "INSERT INTO paper_trades (strategy, symbol, side, opened_at, closed_at,"
-                " entry_price, exit_price, amount, notional, pnl, fee, exit_reason,"
-                " conviction, worst_excursion_pct)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                " entry_price, exit_price, amount, notional, pnl, fee, funding,"
+                " exit_reason, conviction, worst_excursion_pct)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (trade["strategy"], trade["symbol"], trade["side"], trade["opened_at"],
                  trade["closed_at"], trade["entry_price"], trade["exit_price"],
                  trade["amount"], trade["notional"], trade["pnl"], trade["fee"],
-                 trade["exit_reason"], trade["conviction"], trade.get("worst_excursion_pct", 0.0)),
+                 trade.get("funding", 0.0), trade["exit_reason"], trade["conviction"],
+                 trade.get("worst_excursion_pct", 0.0)),
             )
             self._db.commit()
 

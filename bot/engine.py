@@ -21,7 +21,7 @@ from datetime import datetime, timezone
 from bot.config import Config
 from bot.exchanges.base import ExchangeError, FuturesExchange
 from bot.execution import ExecutionResult, Executor
-from bot.models import Candle, Position, Signal, SignalAction
+from bot.models import Candle, FundingRate, Position, Signal, SignalAction
 from bot.risk import RiskManager
 from bot.paper import PaperArena
 from bot.store import Fill as StoredFill
@@ -58,6 +58,7 @@ class TradingEngine:
         strategy: Strategy | None = None,
         store: Store | None = None,
         history_interval_sec: float = 60.0,
+        funding_interval_sec: float = 300.0,
         arena: PaperArena | None = None,
     ) -> None:
         self.config = config
@@ -71,6 +72,11 @@ class TradingEngine:
         # 나머지도 같은 시세를 보며 성적을 남겨, 지금 쓰는 게 제일 나은지
         # 실시간 데이터로 판단할 수 있게 한다.
         self.arena = arena
+        # 펀딩비율 캐시. 8시간마다 정산되는 값이라 매 주기(15초) 조회할 이유가
+        # 없다 — 심볼마다 몇 분에 한 번만 갱신한다.
+        self._funding_interval = funding_interval_sec
+        self._funding: dict[str, FundingRate | None] = {}
+        self._funding_at: dict[str, float] = {}
         # None = 아직 한 번도 동기화하지 않음. 0.0 으로 두면 부팅 직후처럼
         # monotonic() 이 작을 때 첫 동기화가 통째로 건너뛰어진다.
         self._last_history_sync: float | None = None
@@ -184,6 +190,27 @@ class TradingEngine:
         self.last_report = report
         return report
 
+    def _funding_rate(self, symbol: str) -> FundingRate | None:
+        """모의매매 비용 계산용 펀딩비율. 몇 분간 캐시한다.
+
+        8시간마다 정산되는 값이라 매 주기(15초) 조회할 이유가 없다. 조회에
+        실패하면 None 을 캐시한다 — 거래소가 이 값을 안 주는 상황에서 매 주기
+        재시도해 봐야 매매 주기만 느려진다. 받는 쪽이 보수적인 기본값으로
+        대체한다.
+        """
+        now = time.monotonic()
+        last = self._funding_at.get(symbol)
+        if last is not None and now - last < self._funding_interval:
+            return self._funding.get(symbol)
+        try:
+            rate = self.exchange.fetch_funding_rate(symbol)
+        except Exception as exc:
+            log.debug("%s 펀딩비 조회 실패 — 기본값으로 계산합니다: %s", symbol, exc)
+            rate = None
+        self._funding[symbol] = rate
+        self._funding_at[symbol] = now
+        return rate
+
     def _sync_history(self, equity: float) -> None:
         """체결 내역과 자기자본을 저장소에 남긴다.
 
@@ -256,7 +283,7 @@ class TradingEngine:
         # 계속되어야 한다 — 비교용 기능이 본업을 막으면 안 된다.
         if self.arena is not None:
             try:
-                self.arena.step(symbol, candles, ticker)
+                self.arena.step(symbol, candles, ticker, self._funding_rate(symbol))
             except Exception:
                 log.exception("%s 모의매매 처리 실패 — 실거래는 계속합니다", symbol)
 

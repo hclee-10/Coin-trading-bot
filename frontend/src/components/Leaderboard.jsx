@@ -149,6 +149,7 @@ export default function Leaderboard({ data, catalog, onReset, busy, storage }) {
                           <div className="hint" style={{ margin: '10px 0' }}>
                             {s.wins}승 {s.losses}패 · 최고 {signed(s.best_pnl)} ·
                             최악 {signed(s.worst_pnl)} · 수수료 {s.total_fee.toFixed(2)} ·
+                            펀딩비 {s.total_funding.toFixed(2)} ·
                             가상 자기자본 {s.equity.toFixed(2)} / {s.start_equity.toFixed(0)}
                           </div>
                           <div style={{ lineHeight: 1.8 }}>
@@ -168,8 +169,9 @@ export default function Leaderboard({ data, catalog, onReset, busy, storage }) {
       <div className="panel-body" style={{ borderTop: '1px solid var(--border)' }}>
         <p className="hint" style={{ marginTop: 0 }}>
           전략 이름을 누르면 알고리즘 상세가 열립니다. 모든 전략은 같은 시세와 같은
-          사이징 규칙으로 매매하며, 수수료는 항상 taker(0.05%)로 계산합니다 —
-          모의 성적이 실제보다 좋아 보이면 판단이 어긋나기 때문입니다.
+          사이징 규칙으로 매매합니다. 수수료는 항상 taker(0.05%)로, 펀딩비는 거래소의
+          실제 비율로 8시간마다 부과합니다 — 모의 성적이 실제보다 좋아 보이면 판단이
+          어긋나기 때문입니다.
         </p>
         {!confirming ? (
           <button className="ghost" style={{ fontSize: 12 }} onClick={() => setConfirming(true)}>

@@ -127,6 +127,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     bt.add_argument("--taker-fee", type=float, default=0.05, help="taker 수수료 %% (기본 0.05)")
     bt.add_argument("--maker-fee", type=float, default=0.02, help="maker 수수료 %% (기본 0.02)")
+    bt.add_argument(
+        "--funding-rate", type=float, default=0.01,
+        help="8시간당 펀딩비 %% 가정 (기본 0.01, 0 이면 계산하지 않음)",
+    )
 
     web_cmd = sub.add_parser("web", help="웹 대시보드 서버를 실행한다")
     # PORT 는 Railway 등 PaaS 가 주입한다. 있으면 컨테이너 안이라는 뜻이므로
@@ -396,6 +400,7 @@ def _cmd_backtest(config: Config, exchange, args) -> int:
             taker_fee=args.taker_fee / 100.0,
             maker_fee=args.maker_fee / 100.0,
             order_type=args.order_type or config.trading.order_type,
+            funding_rate=args.funding_rate / 100.0,
         )
         results.append(result)
 
@@ -407,7 +412,7 @@ def _cmd_backtest(config: Config, exchange, args) -> int:
 def _print_backtest_table(results, args) -> None:
     header = (
         f"{'전략':<22}{'수익률':>10}{'최대낙폭':>10}{'거래':>7}"
-        f"{'승률':>8}{'손익비':>8}{'수수료':>10}"
+        f"{'승률':>8}{'손익비':>8}{'수수료':>10}{'펀딩비':>10}"
     )
     print(header)
     print("-" * len(header.encode("utf-8").decode("utf-8")) * 1)
@@ -421,6 +426,7 @@ def _print_backtest_table(results, args) -> None:
         print(
             f"{r.strategy:<22}{r.return_pct:>9.2f}%{r.max_drawdown_pct:>9.2f}%"
             f"{r.trade_count:>7}{win:>8}{factor:>8}{r.total_fee:>10.2f}"
+            f"{r.total_funding:>10.2f}"
         )
 
     print()
@@ -428,8 +434,11 @@ def _print_backtest_table(results, args) -> None:
         missed = sum(r.missed_entries for r in results)
         print(f"지정가 미체결로 넘긴 신호: {missed}건")
     print(
-        "수익률은 수수료를 뺀 값입니다. 거래 횟수가 30건 미만이면 우연일 가능성이 크니\n"
-        "결과를 그대로 믿지 마세요. 최대낙폭은 미실현 손실을 포함합니다."
+        f"수익률은 수수료와 펀딩비를 뺀 값입니다. 펀딩비는 과거 실제 비율이 아니라\n"
+        f"8시간당 {args.funding_rate}%% 를 방향과 무관하게 비용으로 가정한 값입니다\n"
+        f"(--funding-rate 로 바꾸거나 0 으로 끌 수 있습니다).\n"
+        "거래 횟수가 30건 미만이면 우연일 가능성이 크니 결과를 그대로 믿지 마세요.\n"
+        "최대낙폭은 미실현 손실을 포함합니다."
     )
 
 

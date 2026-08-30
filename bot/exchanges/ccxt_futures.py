@@ -29,6 +29,7 @@ from bot.models import (
     Balance,
     Candle,
     Fill,
+    FundingRate,
     Market,
     Order,
     Position,
@@ -170,6 +171,34 @@ class CcxtFuturesExchange(FuturesExchange):
             bid=_maybe_float(t.get("bid")),
             ask=_maybe_float(t.get("ask")),
             timestamp=t.get("timestamp"),
+        )
+
+    def fetch_funding_rate(self, symbol: str) -> FundingRate | None:
+        """현재 펀딩비율. 지원하지 않거나 실패하면 None.
+
+        여기서 예외를 밖으로 내보내지 않는다. 펀딩비는 비용을 더 정확히 계산하기
+        위한 부가 정보일 뿐이고, 이것 때문에 매매 주기가 통째로 실패하면 손해가
+        훨씬 크다.
+        """
+        if not self._ex.has.get("fetchFundingRate"):
+            return None
+        self._require_markets()
+        try:
+            data = self._call(self._ex.fetch_funding_rate, symbol)
+        except Exception as exc:  # 거래소·네트워크 어느 쪽이든 치명적이지 않다
+            log.debug("%s 펀딩비 조회 실패 — 기본값으로 계산합니다: %s", symbol, exc)
+            return None
+
+        rate = _maybe_float(data.get("fundingRate"))
+        if rate is None:
+            return None
+        next_time = data.get("fundingTimestamp") or data.get("nextFundingTimestamp")
+        interval = _interval_hours(data.get("interval"))
+        return FundingRate(
+            symbol=data.get("symbol", symbol),
+            rate=rate,
+            next_time_ms=int(next_time) if next_time else None,
+            interval_hours=interval,
         )
 
     # ------------------------------------------------------------------
@@ -452,6 +481,21 @@ class CcxtFuturesExchange(FuturesExchange):
                 closer()
             except Exception:  # pragma: no cover - 종료 경로에서 삼킨다
                 log.debug("%s 세션 종료 중 오류", self.id, exc_info=True)
+
+
+def _interval_hours(value: Any) -> float:
+    """ccxt 의 '8h' 같은 표기를 시간 단위 숫자로. 못 읽으면 8시간으로 본다."""
+    if not value:
+        return 8.0
+    text = str(value).strip().lower()
+    try:
+        if text.endswith("h"):
+            return float(text[:-1])
+        if text.endswith("m"):
+            return float(text[:-1]) / 60.0
+        return float(text)
+    except ValueError:
+        return 8.0
 
 
 def _maybe_float(value: Any) -> float | None:
