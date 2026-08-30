@@ -311,7 +311,8 @@ def _cmd_hash_password() -> int:
     except AuthError as exc:
         print(f"오류: {exc}", file=sys.stderr)
         return 1
-    print("\n아래 두 줄을 .env(로컬) 또는 Railway 환경변수에 추가하세요:\n")
+    print("\n아래 두 줄을 .env(로컬) 또는 배포 환경의 환경변수에 넣으세요.")
+    print("해시는 공백 없는 한 덩어리입니다 — 줄 끝까지 통째로 복사하세요.\n")
     print(f"{USERNAME_ENV}={username}")
     print(f"{PASSWORD_ENV}={encoded}")
     return 0
@@ -339,7 +340,7 @@ def _log_env_diagnostics(config: Config) -> None:
             state = "없음"
         elif name == PASSWORD_ENV and not is_valid_password_hash(value):
             # $ 가 많은 값이라 셸을 거치면 변수 확장으로 중간이 날아가기 쉽다.
-            state = "형식 깨짐(hash-password 출력을 그대로 넣으세요)"
+            state = "값이 깨짐(hash-password 출력을 통째로 넣으세요)"
         else:
             state = "설정됨"
         report.append(f"{name}={state}")

@@ -13,10 +13,12 @@
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import hmac
 import os
 import secrets
+import struct
 import threading
 import time
 from dataclasses import dataclass
@@ -30,6 +32,21 @@ _SCRYPT_DKLEN = 32
 _SCRYPT_MAXMEM = 128 * _SCRYPT_N * _SCRYPT_R * _SCRYPT_P * 2
 _SALT_BYTES = 16
 
+# 해시는 사람이 웹 폼으로 손으로 옮겨야 하는 값이다. 그래서 구분자 없는 단일
+# base64url 토큰으로 인코딩한다:
+#
+#   * 셸을 거쳐도 안전하다 — 예전 `scrypt$32768$8$1$...` 형식은 `$32768` 이
+#     변수로 확장돼 중간이 통째로 날아갔고, 그래도 `scrypt$` 로는 시작해서
+#     한동안 "비밀번호가 틀렸다" 로만 보였다.
+#   * 더블클릭으로 한 번에 선택된다 — `$` 는 단어 경계라 일부만 복사되기 쉽다.
+#
+# 예전 형식으로 만들어 둔 값도 계속 검증한다.
+_TOKEN_VERSION = 1
+_LEGACY_PREFIX = "scrypt$"
+# 토큰 끝에 붙는 체크섬. 값이 한 글자라도 깨지거나 잘리면 걸러진다 — base64 는
+# 앞부분만 잘라도 그럴듯하게 디코딩되기 때문에 길이 검사만으로는 부족하다.
+_CHECKSUM_BYTES = 4
+
 USERNAME_ENV = "WEB_USERNAME"
 PASSWORD_ENV = "WEB_PASSWORD_HASH"
 
@@ -39,7 +56,7 @@ class AuthError(Exception):
 
 
 def hash_password(password: str) -> str:
-    """`scrypt$n$r$p$salt$hash` 형태의 저장용 문자열을 만든다."""
+    """저장용 해시 토큰을 만든다. 구분자 없는 단일 base64url 문자열."""
     if len(password) < 12:
         raise AuthError("비밀번호는 12자 이상이어야 합니다 (인터넷에 노출되는 서버입니다)")
     salt = secrets.token_bytes(_SALT_BYTES)
@@ -47,46 +64,94 @@ def hash_password(password: str) -> str:
         password.encode("utf-8"), salt=salt, n=_SCRYPT_N, r=_SCRYPT_R,
         p=_SCRYPT_P, dklen=_SCRYPT_DKLEN, maxmem=_SCRYPT_MAXMEM,
     )
-    return f"scrypt${_SCRYPT_N}${_SCRYPT_R}${_SCRYPT_P}${salt.hex()}${digest.hex()}"
+    body = (
+        struct.pack(">BIHHB", _TOKEN_VERSION, _SCRYPT_N, _SCRYPT_R, _SCRYPT_P, len(salt))
+        + salt
+        + digest
+    )
+    payload = body + _checksum(body)
+    return base64.urlsafe_b64encode(payload).decode("ascii").rstrip("=")
+
+
+def _checksum(body: bytes) -> bytes:
+    return hashlib.sha256(body).digest()[:_CHECKSUM_BYTES]
+
+
+def _decode_token(encoded: str) -> tuple[int, int, int, bytes, bytes] | None:
+    """토큰에서 (n, r, p, salt, digest) 를 꺼낸다. 깨져 있으면 None."""
+    try:
+        payload = base64.urlsafe_b64decode(encoded + "=" * (-len(encoded) % 4))
+    except ValueError:
+        return None
+    if len(payload) <= _CHECKSUM_BYTES:
+        return None
+
+    body, checksum = payload[:-_CHECKSUM_BYTES], payload[-_CHECKSUM_BYTES:]
+    # 체크섬이 맞지 않으면 값이 잘렸거나 깨진 것이다.
+    if not hmac.compare_digest(_checksum(body), checksum):
+        return None
+
+    try:
+        version, n, r, p, salt_len = struct.unpack(">BIHHB", body[:10])
+    except struct.error:
+        return None
+    if version != _TOKEN_VERSION or salt_len == 0 or min(n, r, p) <= 0:
+        return None
+    salt, digest = body[10 : 10 + salt_len], body[10 + salt_len :]
+    if len(salt) != salt_len or not digest:
+        return None
+    return n, r, p, salt, digest
+
+
+def _decode_legacy(encoded: str) -> tuple[int, int, int, bytes, bytes] | None:
+    """예전 `scrypt$n$r$p$salt$hash` 형식으로 만들어 둔 값도 계속 받아 준다."""
+    parts = encoded.split("$")
+    if len(parts) != 6 or parts[0] != "scrypt":
+        return None
+    try:
+        n, r, p = (int(v) for v in parts[1:4])
+        salt, digest = bytes.fromhex(parts[4]), bytes.fromhex(parts[5])
+    except ValueError:
+        return None
+    if min(n, r, p) <= 0 or not salt or not digest:
+        return None
+    return n, r, p, salt, digest
+
+
+def _decode(encoded: str) -> tuple[int, int, int, bytes, bytes] | None:
+    encoded = encoded.strip()
+    if not encoded:
+        return None
+    if encoded.startswith(_LEGACY_PREFIX):
+        return _decode_legacy(encoded)
+    return _decode_token(encoded)
 
 
 def is_valid_password_hash(encoded: str) -> bool:
     """저장된 해시가 구조적으로 온전한지 확인한다.
 
-    접두사만 보면 부족하다. `WEB_PASSWORD_HASH` 는 `scrypt$32768$8$1$...` 처럼
-    `$` 가 많은 값이라 셸을 거쳐 설정하면 변수 확장으로 중간이 날아가기 쉬운데,
-    그래도 `scrypt$` 로는 시작하기 때문이다. 그 상태를 통과시키면 사용자는
-    "비밀번호가 틀렸다"는 메시지만 보고 원인을 영영 못 찾는다.
+    형식을 어림짐작하면 안 된다. 값이 중간에 잘리거나 깨져도 그럴듯해 보이면
+    통과해 버리고, 그러면 사용자는 "비밀번호가 틀렸다"는 메시지만 보고 원인을
+    영영 못 찾는다.
     """
-    parts = encoded.split("$")
-    if len(parts) != 6 or parts[0] != "scrypt":
-        return False
-    scheme_n, scheme_r, scheme_p, salt_hex, hash_hex = parts[1:]
-    try:
-        if not all(int(v) > 0 for v in (scheme_n, scheme_r, scheme_p)):
-            return False
-        return bool(bytes.fromhex(salt_hex)) and bool(bytes.fromhex(hash_hex))
-    except ValueError:
-        return False
+    return _decode(encoded) is not None
 
 
 def verify_password(password: str, encoded: str) -> bool:
     """저장된 해시와 대조한다. 형식이 깨져 있으면 조용히 False."""
+    decoded = _decode(encoded)
+    if decoded is None:
+        return False
+    n, r, p, salt, expected = decoded
     try:
-        scheme, n, r, p, salt_hex, hash_hex = encoded.split("$")
-        if scheme != "scrypt":
-            return False
         digest = hashlib.scrypt(
-            password.encode("utf-8"),
-            salt=bytes.fromhex(salt_hex),
-            n=int(n), r=int(r), p=int(p),
-            dklen=len(bytes.fromhex(hash_hex)),
-            maxmem=128 * int(n) * int(r) * int(p) * 2,
+            password.encode("utf-8"), salt=salt, n=n, r=r, p=p,
+            dklen=len(expected), maxmem=128 * n * r * p * 2,
         )
-    except (ValueError, TypeError):
+    except ValueError:
         return False
     # 타이밍 공격을 막기 위해 상수 시간 비교를 쓴다.
-    return hmac.compare_digest(digest.hex(), hash_hex)
+    return hmac.compare_digest(digest, expected)
 
 
 @dataclass(frozen=True)
@@ -124,10 +189,9 @@ def load_account() -> Account:
         )
     if not is_valid_password_hash(encoded):
         raise AuthError(
-            f"{PASSWORD_ENV} 형식이 올바르지 않습니다. "
-            "`python -m bot hash-password` 의 출력을 그대로 넣어야 합니다 "
-            "(scrypt$n$r$p$salt$hash 형태). 값에 '$' 가 많아 셸을 거치면 깨질 수 "
-            "있으니, 웹 콘솔에 직접 붙여넣거나 작은따옴표로 감싸세요."
+            f"{PASSWORD_ENV} 값이 깨졌거나 형식이 올바르지 않습니다. "
+            "`python -m bot hash-password` 가 출력한 한 줄을 처음부터 끝까지 "
+            "그대로 붙여넣으세요 (공백 없는 한 덩어리입니다)."
         )
     return Account(username=username, password_hash=encoded)
 

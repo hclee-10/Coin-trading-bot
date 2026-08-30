@@ -120,8 +120,12 @@ cd frontend && npm install && npm run build && cd ..
 python -m bot hash-password
 ```
 
-`WEB_USERNAME` 과 `WEB_PASSWORD_HASH` 가 모두 없으면 서버는 뜨지 않는다.
-기본 계정은 존재하지 않으며, 비밀번호가 12자 미만이면 거부된다.
+`WEB_USERNAME` 과 `WEB_PASSWORD_HASH` 가 없거나 값이 깨져 있으면 로그인이
+불가능하다. 기본 계정은 존재하지 않으며, 비밀번호가 12자 미만이면 거부된다.
+
+해시는 **공백도 특수문자도 없는 한 덩어리**이므로 줄 끝까지 통째로 복사한다.
+값이 한 글자라도 잘리거나 깨지면 체크섬에서 걸러져, 로그인 화면과 기동 로그가
+"비밀번호가 틀렸다" 가 아니라 "값이 깨졌다" 고 알려 준다.
 
 ### 실행
 
@@ -202,7 +206,7 @@ Variables 탭에서 설정한다. **Railway 는 `PORT` 를 자동으로 주입�
 | 변수 | 필수 | 설명 |
 |---|---|---|
 | `WEB_USERNAME` | ✅ | 대시보드 아이디 |
-| `WEB_PASSWORD_HASH` | ✅ | `hash-password` 가 출력한 `scrypt$...` 해시 |
+| `WEB_PASSWORD_HASH` | ✅ | `hash-password` 가 출력한 해시 (공백 없는 한 덩어리) |
 | `GATE_API_KEY` / `GATE_API_SECRET` | ✅ | Gate.io 를 쓸 때 (패스프레이즈 없음) |
 | `BITGET_API_KEY` / `BITGET_API_SECRET` / `BITGET_API_PASSPHRASE` | ✅ | Bitget 을 쓸 때 |
 | `OKX_API_KEY` / `OKX_API_SECRET` / `OKX_API_PASSPHRASE` | ✅ | OKX 를 쓸 때 |

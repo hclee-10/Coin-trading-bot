@@ -424,16 +424,17 @@ def test_server_serves_without_an_account_but_refuses_every_login():
 @pytest.mark.parametrize(
     "label,encoded",
     [
-        ("셸 변수 확장으로 중간이 날아감", "scrypt$$$"),
-        ("끝이 잘림", "scrypt$32768$8$1$abcd"),
-        ("접두사만 남음", "scrypt$"),
+        ("빈 값", ""),
+        ("공백만", "   "),
         ("비밀번호 원문을 그대로 넣음", "my-plain-password"),
-        ("16진수가 아님", "scrypt$32768$8$1$zzzz$zzzz"),
-        ("파라미터가 0", "scrypt$0$8$1$abcd$abcd"),
+        ("예전 형식이 셸 확장으로 날아감", "scrypt$$$"),
+        ("예전 형식이 잘림", "scrypt$32768$8$1$abcd"),
+        ("예전 형식이 16진수가 아님", "scrypt$32768$8$1$zzzz$zzzz"),
+        ("예전 형식 파라미터가 0", "scrypt$0$8$1$abcd$abcd"),
     ],
 )
 def test_broken_password_hashes_are_rejected(label, encoded):
-    """접두사만 보면 셸에서 깨진 해시를 통과시켜, 원인이 '비밀번호 오류'로 보인다."""
+    """깨진 값을 통과시키면 원인이 '비밀번호 오류'로 보여 영영 못 찾는다."""
     from bot.web.auth import is_valid_password_hash
 
     assert is_valid_password_hash(encoded) is False, label
@@ -445,11 +446,67 @@ def test_a_real_hash_is_accepted():
     assert is_valid_password_hash(hash_password("correct-horse-battery")) is True
 
 
+# --- 토큰 형식 -----------------------------------------------------------
+def test_token_has_no_characters_that_break_copying_or_shells():
+    """웹 폼으로 손으로 옮기는 값이라 특수문자가 없어야 한다.
+
+    예전 `scrypt$32768$8$1$...` 형식은 `$` 가 셸에서 변수로 확장돼 중간이
+    날아갔고, 더블클릭 선택도 `$` 에서 끊겨 일부만 복사되기 쉬웠다.
+    """
+    token = hash_password("correct-horse-battery")
+
+    assert all(c.isalnum() or c in "-_" for c in token)
+    assert "$" not in token and " " not in token
+
+
+def test_truncated_token_is_detected():
+    """base64 는 앞부분만 잘라도 디코딩돼서, 길이 검사만으로는 못 잡는다."""
+    from bot.web.auth import is_valid_password_hash
+
+    token = hash_password("correct-horse-battery")
+
+    assert is_valid_password_hash(token[:40]) is False
+    assert is_valid_password_hash(token[:-1]) is False
+
+
+def test_single_character_corruption_is_detected():
+    from bot.web.auth import is_valid_password_hash
+
+    token = hash_password("correct-horse-battery")
+    swapped = "B" if token[10] != "B" else "C"
+    corrupted = token[:10] + swapped + token[11:]
+
+    assert is_valid_password_hash(corrupted) is False
+
+
+def test_legacy_hashes_still_work():
+    """예전 형식으로 만들어 둔 값이 갑자기 막히면 안 된다."""
+    from bot.web.auth import is_valid_password_hash, verify_password
+
+    legacy = (
+        "scrypt$32768$8$1$20c9c23c35346afc92e9d891660619f5$"
+        "3e26eed9fadda2743f0dd8baeb7737c3fd98561ab56c05f47de4af06504c3169"
+    )
+
+    assert is_valid_password_hash(legacy) is True
+    assert verify_password("correct-horse-battery", legacy) is True
+    assert verify_password("wrong", legacy) is False
+
+
+def test_surrounding_whitespace_is_tolerated():
+    """붙여넣기에 줄바꿈이 섞여도 계정이 못 쓰게 되면 안 된다."""
+    from bot.web.auth import verify_password
+
+    token = hash_password("correct-horse-battery")
+
+    assert verify_password("correct-horse-battery", f"  {token}\n") is True
+
+
 def test_broken_hash_env_fails_loudly_instead_of_looking_like_a_wrong_password(monkeypatch):
     from bot.web.auth import AuthError, load_account
 
     monkeypatch.setenv("WEB_USERNAME", "trader")
     monkeypatch.setenv("WEB_PASSWORD_HASH", "scrypt$$$")
 
-    with pytest.raises(AuthError, match=r"\$"):
+    with pytest.raises(AuthError, match="WEB_PASSWORD_HASH"):
         load_account()
