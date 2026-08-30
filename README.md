@@ -2,6 +2,7 @@
 
 Bitget / OKX **USDT 무기한 선물** 자동매매 봇. 거래소는 `ccxt` 로 추상화되어
 있어 설정 한 줄로 갈아탈 수 있고, 매매 전략은 플러그인으로 끼워 넣는다.
+터미널에서도, 브라우저 대시보드에서도 돌릴 수 있다.
 
 현재 상태: **골격 완성.** 데이터 수집 → 전략 판단 → 리스크 사이징 → 주문
 전송 → 손절/익절 등록까지 전 경로가 동작한다. 매매 전략 자체는 비어 있다
@@ -82,7 +83,176 @@ python -m bot close --live  # 보유 포지션 전부 시장가 청산
 `Ctrl+C` 또는 `SIGTERM` 을 받으면 현재 주기를 마치고 종료한다.
 `trading.close_positions_on_exit: true` 면 종료 시 포지션을 정리한다.
 
-## 5. 리스크 관리 — 수량이 정해지는 방식
+## 5. 웹 대시보드
+
+브라우저에서 봇 상태를 보고 시작·정지·긴급 청산까지 할 수 있다. 봇은 서버에서
+돌고 브라우저는 이 서버의 API 만 호출한다 — **API 키는 절대 브라우저로
+내려가지 않는다.**
+
+### 준비
+
+```bash
+pip install -r requirements-web.txt
+
+# 프론트엔드 빌드 (Node 20+ 필요). 산출물은 bot/web/static/ 에 생성된다.
+cd frontend && npm install && npm run build && cd ..
+
+# 대시보드 비밀번호 해시 생성 → 출력된 줄을 .env 에 붙여넣기
+python -m bot hash-password
+```
+
+`WEB_PASSWORD_HASH` 가 없으면 서버는 뜨지 않는다. 기본 비밀번호는 존재하지
+않으며, 12자 미만은 거부된다.
+
+### 실행
+
+```bash
+python -m bot web                      # http://127.0.0.1:8000
+python -m bot web --port 9000          # 포트 변경
+```
+
+기본 바인드 주소는 `127.0.0.1` 이다. 외부에서 접속하려면 `--host 0.0.0.0` 으로
+직접 여는 대신 **리버스 프록시 뒤에 두는 구성**을 쓴다 (6절).
+
+프론트엔드를 고치면서 개발할 때는 `python -m bot web` 을 띄워 둔 채로:
+
+```bash
+cd frontend && npm run dev    # http://localhost:5173, /api 는 8000 으로 프록시
+```
+
+### 화면에서 할 수 있는 것
+
+| 기능 | 설명 |
+|---|---|
+| 상태 카드 | 자기자본, 오늘 손익(UTC 기준), 보유 포지션 수, 마지막 주기 시각 |
+| 포지션 표 | 방향, 수량, 진입가, 명목가, 미실현 손익, 청산가 |
+| 실시간 로그 | 봇 로그를 그대로 스트리밍. 위로 스크롤하면 자동 추적이 멈춘다 |
+| 봇 제어 | DRY-RUN 시작 / 실거래 시작 / 정지 |
+| 긴급 전체 청산 | 봇을 멈추고 보유 포지션을 전부 시장가 청산 |
+
+**킬스위치가 걸리면** 화면 상단에 배너가 뜨고 사유가 표시된다. **실거래 모드로
+도는 동안에도** 붉은 배너가 계속 떠 있다 — DRY-RUN 인 줄 알고 방치하는 사고를
+막기 위해서다.
+
+### 보안 모델
+
+웹 UI 를 붙이는 순간 내 계좌를 조작할 수 있는 창구가 네트워크에 열린다.
+그래서 다음이 기본값이다:
+
+- **비밀번호는 scrypt 로 해시해 저장한다.** 원문은 어디에도 남지 않는다.
+- **세션 토큰은 서버 메모리에만 있다.** 프로세스를 재시작하면 전부 무효가 되고,
+  로그아웃이 즉시 반영된다(JWT 와 달리 폐기가 확실하다). 기본 만료는 12시간.
+- **로그인 실패는 IP 단위로 5회까지**, 초과하면 5분 잠금.
+- **자금이 움직이는 동작은 확인 문구를 요구한다** — 실거래 시작은 `LIVE`,
+  긴급 청산은 `CLOSE`. 프론트엔드와 백엔드가 각각 검사한다.
+- **제어 동작은 접속 IP 와 함께 로그에 남는다.**
+- **응답에 시크릿이 없다.** `/api/config` 는 거래 파라미터만 돌려준다.
+- CSP·X-Frame-Options 등 보안 헤더를 붙이고, 외부 스크립트를 일절 쓰지 않는다.
+
+브라우저가 하는 일은 서버 API 호출뿐이다. 거래소를 직접 부르지 않는다.
+
+## 6. VPS 배포
+
+`--host 0.0.0.0` 으로 직접 여는 것은 권하지 않는다. HTTPS 없이 열면 비밀번호와
+세션 토큰이 평문으로 오간다. 아래 구성을 쓴다:
+
+```
+브라우저 ──HTTPS──> nginx (443) ──HTTP──> 봇 서버 (127.0.0.1:8000)
+```
+
+### 1) 봇 서버는 localhost 로만
+
+```bash
+python -m bot web --host 127.0.0.1 --port 8000
+```
+
+### 2) systemd 서비스
+
+`/etc/systemd/system/tradingbot.service`:
+
+```ini
+[Unit]
+Description=Coin Trading Bot Dashboard
+After=network-online.target
+
+[Service]
+Type=simple
+User=tradingbot
+WorkingDirectory=/opt/coin-trading-bot
+ExecStart=/opt/coin-trading-bot/.venv/bin/python -m bot web --host 127.0.0.1 --port 8000
+Restart=on-failure
+RestartSec=10
+# .env 는 이 사용자만 읽을 수 있어야 한다 (chmod 600)
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/coin-trading-bot/logs
+
+[Install]
+WantedBy=multi-user.target
+```
+
+```bash
+sudo systemctl enable --now tradingbot
+sudo journalctl -u tradingbot -f
+```
+
+**서버가 재시작되어도 봇은 자동으로 매매를 시작하지 않는다.** 대시보드에서
+직접 시작해야 한다 — 의도적인 설계다.
+
+### 3) nginx + HTTPS
+
+```nginx
+server {
+    listen 443 ssl http2;
+    server_name bot.example.com;
+
+    ssl_certificate     /etc/letsencrypt/live/bot.example.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/bot.example.com/privkey.pem;
+
+    # 가능하면 접속 IP 를 제한한다 — 가장 효과적인 한 줄이다
+    # allow 203.0.113.7;
+    # deny all;
+
+    location / {
+        proxy_pass http://127.0.0.1:8000;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+}
+
+server {
+    listen 80;
+    server_name bot.example.com;
+    return 301 https://$host$request_uri;
+}
+```
+
+인증서는 `certbot --nginx -d bot.example.com` 으로 발급한다.
+
+### 4) 방화벽
+
+```bash
+sudo ufw allow 22/tcp
+sudo ufw allow 443/tcp
+sudo ufw enable          # 8000 은 열지 않는다 — nginx 만 접근하면 된다
+```
+
+### 5) 배포 후 확인
+
+- [ ] `https://` 로 접속되고 인증서 경고가 없는가
+- [ ] `http://<서버IP>:8000` 이 **밖에서 접속되지 않는가**
+- [ ] 틀린 비밀번호 6회 시도 후 잠기는가
+- [ ] 거래소 API 키에 이 VPS 의 IP 화이트리스트가 걸려 있는가
+- [ ] `.env` 파일 권한이 `600` 인가
+
+> 접속 IP 제한(`allow`/`deny`)을 걸 수 있다면 반드시 걸 것. 비밀번호 하나만으로
+> 자금 제어권을 지키는 것보다 훨씬 안전하다.
+
+## 7. 리스크 관리 — 수량이 정해지는 방식
 
 전략은 **방향만** 정하고, **얼마나 걸지는 `RiskManager` 가 정한다.** 전략을
 갈아 끼워도 계좌 보호 규칙이 그대로 남게 하려는 의도적인 분리다.
@@ -109,7 +279,7 @@ python -m bot close --live  # 보유 포지션 전부 시장가 청산
 신규 진입이 차단된다. 청산 신호는 계속 처리된다(빠져나올 길은 막지 않는다).
 다음 UTC 일자에 자동 해제된다.
 
-## 6. 전략 추가하기
+## 8. 전략 추가하기
 
 ```bash
 cp bot/strategies/template.py bot/strategies/my_strategy.py
@@ -131,7 +301,7 @@ cp bot/strategies/template.py bot/strategies/my_strategy.py
   반영된다.
 - `warmup_candles` 를 선언하면 엔진이 캔들이 충분히 쌓일 때까지 호출을 미룬다.
 
-## 7. 구조
+## 9. 구조
 
 ```
 bot/
@@ -149,8 +319,21 @@ bot/
   execution.py         신호 → 주문 (주문이 나가는 유일한 지점)
   engine.py            메인 루프, 오류 격리, 그레이스풀 종료
   cli.py               커맨드라인
+  web/
+    auth.py            scrypt 비밀번호, 세션 토큰, 로그인 시도 제한
+    supervisor.py      봇 스레드 생명주기 + 거래소 동시 접근 차단
+    app.py             FastAPI 라우트, 보안 헤더, 확인 문구 검사
+    static/            프론트엔드 빌드 산출물 (npm run build 로 생성)
+frontend/              React 대시보드 소스 (Vite)
 tests/                 네트워크 없이 도는 단위 테스트 (가짜 거래소 사용)
 ```
+
+웹 계층에서 지킨 동시성 원칙 하나: **거래소 객체는 한 번에 한 스레드만
+만진다.** ccxt 의 동기 클라이언트는 `requests.Session` 을 재사용해 스레드
+안전하지 않다. 그래서 봇이 도는 동안 대시보드는 봇 루프가 이미 받아 둔
+결과만 읽고, 봇이 멈춰 있을 때만 요청 스레드가 짧게 거래소를 조회한다
+(그마저도 5초 캐시를 거친다 — 대시보드 폴링과 열린 탭 수가 레이트리밋을
+태우지 않도록). 긴급 청산은 봇을 먼저 멈춘 뒤 실행한다.
 
 거래소별로 다른 것은 `ccxt_futures.py` 안에서만 다룬다:
 
@@ -164,16 +347,18 @@ tests/                 네트워크 없이 도는 단위 테스트 (가짜 거�
 - **조건부 주문** — 손절/익절은 ccxt 통합 파라미터로 보내고, 취소는 일반 주문과
   트리거 주문을 각각 훑는다(거래소마다 대량 취소의 트리거 주문 포함 여부가 다름).
 
-## 8. 테스트
+## 10. 테스트
 
 ```bash
 pip install -r requirements-dev.txt
 pytest
 ```
 
-가짜 거래소(`tests/fakes.py`)를 쓰므로 네트워크도 API 키도 필요 없다.
+가짜 거래소(`tests/fakes.py`)를 쓰므로 네트워크도 API 키도 필요 없다. 웹 API
+테스트는 FastAPI 의 `TestClient` 로 실제 라우트를 통과시킨다 — 인증 우회,
+확인 문구 없는 주문, 시크릿 노출을 각각 검증한다.
 
-## 9. 알려진 한계
+## 11. 알려진 한계
 
 - **단방향(one-way) 모드만 지원.** 헤지 모드는 설정 단계에서 막는다.
 - **백테스트 없음.** 과거 데이터로 전략을 검증하는 기능은 포함되어 있지 않다.
@@ -184,8 +369,15 @@ pytest
   (전략 내부 상태는 초기화된다).
 - **일일 손실 킬스위치는 자기자본 스냅샷 기준이다.** 봇이 꺼져 있는 동안의
   변동은 반영되지 않는다.
+- **대시보드는 폴링 방식이다** (2초 간격). WebSocket 실시간 푸시가 아니라
+  최대 2초의 지연이 있다.
+- **대시보드에서 설정을 바꿀 수 없다.** 심볼·레버리지·리스크 파라미터는
+  `config.yaml` 을 고치고 봇을 재시작해야 반영된다.
+- **사용자는 한 명뿐이다.** 비밀번호 하나를 공유하는 단일 계정 모델이라
+  누가 버튼을 눌렀는지는 IP 로만 구분된다.
+- **로그 버퍼는 메모리에 최근 1000줄만 둔다.** 그 이상은 로그 파일을 본다.
 
-## 10. 실거래 전 체크리스트
+## 12. 실거래 전 체크리스트
 
 - [ ] API 키에 출금 권한이 꺼져 있는가
 - [ ] `python -m bot check` 가 정상 잔고를 보여주는가

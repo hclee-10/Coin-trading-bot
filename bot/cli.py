@@ -6,11 +6,14 @@
     python -m bot run                   # DRY-RUN 으로 루프 실행
     python -m bot run --live            # 실거래로 루프 실행
     python -m bot close --live          # 모든 포지션 시장가 청산
+    python -m bot hash-password         # 웹 대시보드 비밀번호 해시 생성
+    python -m bot web                   # 웹 대시보드 서버 실행
 """
 
 from __future__ import annotations
 
 import argparse
+import getpass
 import logging
 import os
 import sys
@@ -27,6 +30,8 @@ from bot.strategies import available_strategies
 log = logging.getLogger(__name__)
 
 DEFAULT_CONFIG = "config.yaml"
+STATIC_DIR = Path(__file__).parent / "web" / "static"
+
 
 
 def load_dotenv(path: str | Path = ".env") -> None:
@@ -74,6 +79,18 @@ def build_parser() -> argparse.ArgumentParser:
     close_cmd = sub.add_parser("close", help="보유 포지션을 시장가로 전부 청산한다")
     close_cmd.add_argument("--live", action="store_true", help="실제 청산 주문을 전송한다")
     close_cmd.add_argument("--yes", action="store_true", help="확인 프롬프트를 건너뛴다")
+
+    sub.add_parser(
+        "hash-password", help="웹 대시보드용 비밀번호 해시를 만든다 (WEB_PASSWORD_HASH)"
+    )
+
+    web_cmd = sub.add_parser("web", help="웹 대시보드 서버를 실행한다")
+    web_cmd.add_argument(
+        "--host",
+        default="127.0.0.1",
+        help="바인드 주소. 기본값은 localhost 전용 — 외부 노출은 리버스 프록시를 통하세요.",
+    )
+    web_cmd.add_argument("--port", type=int, default=8000, help="포트 (기본 8000)")
     return parser
 
 
@@ -97,6 +114,9 @@ def main(argv: list[str] | None = None) -> int:
             print(f"  - {name}")
         return 0
 
+    if args.command == "hash-password":
+        return _cmd_hash_password()
+
     load_dotenv(args.env_file)
 
     try:
@@ -108,10 +128,15 @@ def main(argv: list[str] | None = None) -> int:
     setup_logging(args.log_level or config.logging.level, config.logging.file)
 
     try:
+        # web 은 거래소를 봇 시작 시점에 만들지만, 키가 없는 채로 서버를 띄우면
+        # 시작 버튼을 눌러야만 문제를 알게 된다. 여기서 미리 확인한다.
         credentials = Credentials.from_env(config.exchange.id)
     except ConfigError as exc:
         print(f"인증 오류: {exc}", file=sys.stderr)
         return 2
+
+    if args.command == "web":
+        return _cmd_web(config, args)
 
     try:
         exchange = create_exchange(config.exchange, credentials)
@@ -220,6 +245,76 @@ def _cmd_run(config: Config, exchange, args) -> int:
 
     engine = TradingEngine(config, exchange, dry_run=not args.live)
     engine.run()
+    return 0
+
+
+def _cmd_hash_password() -> int:
+    """비밀번호를 받아 WEB_PASSWORD_HASH 에 넣을 해시를 출력한다.
+
+    원문은 화면에 찍히지 않고 어디에도 저장되지 않는다.
+    """
+    from bot.web.auth import AuthError, hash_password
+
+    try:
+        password = getpass.getpass("웹 대시보드 비밀번호: ")
+        again = getpass.getpass("다시 입력: ")
+    except (EOFError, KeyboardInterrupt):
+        print("\n취소했습니다.", file=sys.stderr)
+        return 1
+    if password != again:
+        print("두 입력이 일치하지 않습니다.", file=sys.stderr)
+        return 1
+    try:
+        encoded = hash_password(password)
+    except AuthError as exc:
+        print(f"오류: {exc}", file=sys.stderr)
+        return 1
+    print("\n아래 줄을 .env 에 추가하세요:\n")
+    print(f"WEB_PASSWORD_HASH={encoded}")
+    return 0
+
+
+def _cmd_web(config: Config, args) -> int:
+    """웹 대시보드 서버를 실행한다."""
+    import uvicorn
+
+    from bot.logging_utils import LogBuffer
+    from bot.web.app import create_app
+    from bot.web.auth import AuthError, load_password_hash
+    from bot.web.supervisor import BotSupervisor
+
+    try:
+        password_hash = load_password_hash()
+    except AuthError as exc:
+        print(f"인증 설정 오류: {exc}", file=sys.stderr)
+        return 2
+
+    # 로그를 파일·콘솔과 함께 메모리 버퍼로도 흘려보낸다. 대시보드가 이걸 읽는다.
+    log_buffer = LogBuffer(capacity=1000)
+    setup_logging(args.log_level or config.logging.level, config.logging.file, log_buffer)
+
+    if args.host not in ("127.0.0.1", "localhost", "::1"):
+        log.warning(
+            "서버를 %s 로 직접 노출합니다. HTTPS 종료와 접근 제한을 담당하는 "
+            "리버스 프록시(nginx 등) 뒤에 두고, 이 서버는 127.0.0.1 로 바인드하는 "
+            "구성을 권장합니다. README 의 배포 절을 확인하세요.",
+            args.host,
+        )
+    if not STATIC_DIR.is_dir():
+        log.warning(
+            "프론트엔드 빌드가 없습니다 (%s). frontend/ 에서 "
+            "`npm install && npm run build` 를 실행하세요. API 는 그대로 동작합니다.",
+            STATIC_DIR,
+        )
+
+    supervisor = BotSupervisor(config)
+    app = create_app(config, supervisor, log_buffer, password_hash, static_dir=STATIC_DIR)
+
+    log.info("대시보드 서버 시작 — http://%s:%s", args.host, args.port)
+    try:
+        uvicorn.run(app, host=args.host, port=args.port, log_config=None, access_log=False)
+    finally:
+        supervisor.stop()
     return 0
 
 

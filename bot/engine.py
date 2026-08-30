@@ -14,7 +14,8 @@ from __future__ import annotations
 import logging
 import signal as signal_module
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
 
 from bot.config import Config
 from bot.exchanges.base import ExchangeError, FuturesExchange
@@ -28,12 +29,15 @@ log = logging.getLogger(__name__)
 
 @dataclass
 class CycleReport:
-    """한 주기의 요약 — 테스트와 로그에서 쓴다."""
+    """한 주기의 요약 — 테스트, 로그, 웹 대시보드가 함께 읽는다."""
 
     equity: float
     open_positions: int
     results: list[ExecutionResult]
     halted: bool = False
+    halt_reason: str = ""
+    positions: dict[str, Position] = field(default_factory=dict)
+    at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
 
 class TradingEngine:
@@ -57,6 +61,11 @@ class TradingEngine:
             allow_reverse=config.trading.allow_reverse,
         )
         self._stop = threading.Event()
+        # 웹 대시보드가 폴링으로 읽어 가는 최신 상태. 루프 스레드가 쓰고 다른
+        # 스레드가 읽으므로, 매번 새 객체로 통째로 갈아 끼워 찢긴 값을 막는다.
+        self.last_report: CycleReport | None = None
+        self.last_error: str | None = None
+        self.started_at: datetime | None = None
 
     # ------------------------------------------------------------------
     def prepare(self) -> None:
@@ -113,9 +122,16 @@ class TradingEngine:
             elif result.action == "exited":
                 open_count = max(0, open_count - 1)
 
-        return CycleReport(
-            equity=equity, open_positions=open_count, results=results, halted=self.risk.halted
+        report = CycleReport(
+            equity=equity,
+            open_positions=open_count,
+            results=results,
+            halted=self.risk.halted,
+            halt_reason=self.risk.halt_reason,
+            positions=positions,
         )
+        self.last_report = report
+        return report
 
     def _process_symbol(
         self, symbol: str, position: Position, equity: float, open_count: int
@@ -163,18 +179,27 @@ class TradingEngine:
         )
 
     # ------------------------------------------------------------------
-    def run(self) -> None:
-        """SIGINT/SIGTERM 을 받을 때까지 주기를 반복한다."""
-        self._install_signal_handlers()
+    def run(self, *, install_signal_handlers: bool = True) -> None:
+        """중지 요청을 받을 때까지 주기를 반복한다.
+
+        웹 서버가 이 엔진을 백그라운드 스레드로 돌릴 때는 시그널 핸들러를
+        설치하면 안 된다 — 프로세스 종료는 웹 서버가 관리한다.
+        """
+        if install_signal_handlers:
+            self._install_signal_handlers()
+        self.started_at = datetime.now(timezone.utc)
         self.prepare()
         try:
             while not self._stop.is_set():
                 try:
                     report = self.run_cycle()
+                    self.last_error = None
                     self._log_cycle(report)
-                except ExchangeError:
+                except ExchangeError as exc:
+                    self.last_error = f"거래소 오류: {exc}"
                     log.exception("주기 실행 중 거래소 오류 — 다음 주기에 재시도합니다")
-                except Exception:
+                except Exception as exc:
+                    self.last_error = f"내부 오류: {exc}"
                     log.exception("주기 실행 중 예기치 못한 오류 — 다음 주기에 재시도합니다")
                 self._stop.wait(self.config.trading.poll_interval_sec)
         finally:

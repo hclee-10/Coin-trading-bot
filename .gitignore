@@ -14,3 +14,7 @@ venv/
 # 런타임 산출물
 logs/
 state/
+
+# 프론트엔드 (빌드는 배포 시 `npm run build` 로 생성)
+frontend/node_modules/
+bot/web/static/
