@@ -43,44 +43,41 @@ export default function App() {
   // 세 요청을 개별적으로 처리하는 것이 중요하다. 하나로 묶으면 포지션 조회가
   // 잠깐 실패했다는 이유로 상태 카드와 정지·긴급청산 버튼까지 화면에서
   // 사라진다 — 네트워크가 흔들릴 때가 바로 그 버튼이 가장 필요한 때다.
-  const poll = useCallback(async () => {
-    const [statusResult, positionsResult, logsResult, chartResult, perfResult] =
-      await Promise.allSettled([
-        api.status(),
-        api.positions(),
-        api.logs(logSeq.current),
-        api.chart(),
-        api.performance(),
-      ])
+  const applyLogs = useCallback(({ entries, latest_seq: latestSeq }) => {
+    // 서버가 재시작하면 로그 시퀀스가 초기화된다. 우리가 들고 있던 번호가
+    // 서버보다 크면 그런 경우다 — 그대로 두면 "그 번호 이후" 를 계속 요청해
+    // 아무것도 못 받고 화면의 로그가 영원히 멈춘다.
+    if (latestSeq < logSeq.current) {
+      logSeq.current = 0
+      setLogs([])
+      return
+    }
+    if (entries.length > 0) {
+      logSeq.current = latestSeq
+      setLogs((prev) => [...prev, ...entries].slice(-MAX_LOG_LINES))
+    }
+  }, [])
 
-    const failures = [statusResult, positionsResult, logsResult, chartResult, perfResult].filter(
-      (r) => r.status === 'rejected',
-    )
+  const poll = useCallback(async () => {
+    // 각 응답이 도착하는 대로 화면에 반영한다. 전부 모아서 한 번에 그리면,
+    // 봇이 멈춰 있을 때 차트가 거래소에서 캔들을 받아오는 몇 초 동안 화면
+    // 전체가 "불러오는 중" 에 묶인다 — 상태는 이미 도착해 있는데도.
+    const results = await Promise.allSettled([
+      api.status().then(setStatus),
+      api.positions().then(setPositions),
+      api.logs(logSeq.current).then(applyLogs),
+      api.chart().then(setChart),
+      api.performance().then(setPerformance),
+    ])
+
+    const failures = results.filter((r) => r.status === 'rejected')
     const expired = failures.find((r) => r.reason?.status === 401)
     if (expired) {
       handleError(expired.reason)
       return
     }
-
-    if (statusResult.status === 'fulfilled') setStatus(statusResult.value)
-    if (positionsResult.status === 'fulfilled') setPositions(positionsResult.value)
-    if (logsResult.status === 'fulfilled') {
-      const { entries, latest_seq: latestSeq } = logsResult.value
-      // 서버가 재시작하면 로그 시퀀스가 초기화된다. 우리가 들고 있던 번호가
-      // 서버보다 크면 그런 경우다 — 그대로 두면 "그 번호 이후" 를 계속 요청해
-      // 아무것도 못 받고 화면의 로그가 영원히 멈춘다.
-      if (latestSeq < logSeq.current) {
-        logSeq.current = 0
-        setLogs([])
-      } else if (entries.length > 0) {
-        logSeq.current = latestSeq
-        setLogs((prev) => [...prev, ...entries].slice(-MAX_LOG_LINES))
-      }
-    }
-    if (chartResult.status === 'fulfilled') setChart(chartResult.value)
-    if (perfResult.status === 'fulfilled') setPerformance(perfResult.value)
     setError(failures.length > 0 ? failures[0].reason.message : '')
-  }, [handleError])
+  }, [handleError, applyLogs])
 
   useEffect(() => {
     if (!authed) return undefined
@@ -149,6 +146,8 @@ export default function App() {
         <span className="spacer" />
         <span className="meta">
           {status.exchange.toUpperCase()} · {status.leverage}x · {status.symbols.join(', ')}
+          {' · '}
+          <strong style={{ color: 'var(--text)' }}>{status.strategy}</strong>
         </span>
         <button className="ghost" onClick={logout}>로그아웃</button>
       </header>
