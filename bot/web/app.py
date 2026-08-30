@@ -131,10 +131,15 @@ def create_app(
         if account is None:
             # 계정이 없으면 아무도 로그인할 수 없다. 죽은 사이트를 보여 주는
             # 대신 로그인 화면에서 원인을 알려 준다 — 제어권이 열리는 것은 아니다.
+            #
+            # 둘 중 어느 변수가 문제인지까지 말해 준다. 이 상태에서는 로그인이
+            # 아예 불가능하고 값이 아니라 변수 이름만 나가므로, 배포 로그를 뒤지지
+            # 않고 원인을 아는 편의가 훨씬 크다.
             log.error("로그인 시도했으나 서버에 계정이 설정되어 있지 않습니다 — ip=%s", ip)
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail="서버에 로그인 계정이 설정되지 않았습니다. "
+                detail=startup_error
+                or "서버에 로그인 계정이 설정되지 않았습니다. "
                 "WEB_USERNAME 과 WEB_PASSWORD_HASH 환경변수를 확인하세요.",
             )
         locked = login_throttle.locked_for(ip)

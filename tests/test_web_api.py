@@ -411,7 +411,8 @@ def test_server_serves_without_an_account_but_refuses_every_login():
         "/api/login", json={"username": "anyone", "password": "anything"}
     )
     assert response.status_code == 503
-    assert "WEB_USERNAME" in response.json()["detail"]
+    # 어느 변수가 문제인지까지 알려 줘야 배포 로그를 뒤지지 않는다
+    assert "WEB_PASSWORD_HASH" in response.json()["detail"]
 
     # 제어 엔드포인트는 여전히 잠겨 있다
     assert client.get("/api/status").status_code == 401
