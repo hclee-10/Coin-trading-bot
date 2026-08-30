@@ -39,8 +39,15 @@ pip install -r requirements.txt
 | OKX | 계정 → API → V5 API 키 생성 | 키, 시크릿, 패스프레이즈 |
 
 Gate.io 는 API 패스프레이즈 개념이 없어 키와 시크릿 두 개만 넣으면 된다.
-키를 만들 때 권한은 **Read and Write**, 그리고 **Perpetual Futures(무기한 선물)**
-를 켜야 한다 — Spot 권한만으로는 선물 주문이 나가지 않는다.
+키 생성 화면(Create API Key)에서:
+
+* **API Key Type**: `API v4 Key`, **Account Type**: `Trading Account`
+* **Permissions**: `Perpetual Futures` 하나만 켜고 **Read and Write** 로 둔다.
+  잔고·포지션 조회까지 이 권한 하나로 되므로 `Spot Trading`, `Wallets`,
+  `Account` 는 켤 필요가 없다. `Delivery Futures` 는 만기 선물이라 무관하다.
+* **`Withdraw` 는 반드시 꺼 둔다.** 키가 유출돼도 자금을 빼갈 수 없게 하는
+  마지막 방어선이다.
+* 시크릿은 생성 직후 한 번만 보인다. 창을 닫기 전에 복사할 것.
 
 > ⚠️ **Gate 키는 IP 를 묶지 않으면 90일 뒤 자동으로 비활성화된다.**
 > 만료되면 봇이 조용히 주문을 못 내는 상태가 되므로, 다음 중 하나를 택해야 한다:
