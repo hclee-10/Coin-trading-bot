@@ -1,0 +1,37 @@
+# config.yaml 로 복사해서 사용하세요. (config.yaml 은 .gitignore 에 있습니다)
+# API 키는 여기 두지 마세요 — .env 환경변수에서만 읽습니다.
+
+exchange:
+  id: okx                 # okx | bitget
+  margin_mode: isolated   # isolated | cross
+  leverage: 3
+  hedge_mode: false       # 거래소 계정을 단방향(one-way) 모드로 두세요
+  request_timeout_ms: 15000
+
+trading:
+  symbols:
+    - "BTC/USDT:USDT"     # 무기한 선물 형식. 현물('BTC/USDT')이 아닙니다.
+  timeframe: "5m"
+  candle_limit: 300
+  poll_interval_sec: 15
+  quote_currency: USDT
+  allow_reverse: false        # true 면 반대 신호에서 청산 후 즉시 반대 진입
+  close_positions_on_exit: false  # true 면 봇 종료 시 전 포지션 시장가 청산
+
+strategy:
+  name: hold              # `python -m bot strategies` 로 목록 확인
+  params: {}              # 전략의 self.params 로 전달됨
+
+risk:
+  risk_per_trade_pct: 0.5        # 손절 도달 시 잃을 자기자본 비율(%) — 수량은 여기서 역산
+  max_position_notional_pct: 20  # 자기자본 대비 포지션 명목가 상한(%)
+  max_leverage: 5
+  max_open_positions: 2
+  max_daily_loss_pct: 3          # 일일 손실이 이 값을 넘으면 신규 진입 차단
+  min_order_notional: 5
+  default_stop_loss_pct: 1.0     # 전략이 손절가를 안 줄 때 사용
+  default_take_profit_pct: 2.0   # 0 이면 익절 주문을 걸지 않음
+
+logging:
+  level: INFO
+  file: logs/bot.log
