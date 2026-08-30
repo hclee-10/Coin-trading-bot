@@ -291,7 +291,7 @@ def _cmd_hash_password() -> int:
 
     비밀번호 원문은 화면에 찍히지 않고 어디에도 저장되지 않는다.
     """
-    from bot.web.auth import PASSWORD_ENV, USERNAME_ENV, is_valid_password_hash, AuthError, hash_password
+    from bot.web.auth import PASSWORD_ENV, USERNAME_ENV, AuthError, hash_password
 
     try:
         username = input("웹 대시보드 아이디: ").strip()
