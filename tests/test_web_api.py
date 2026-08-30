@@ -1002,3 +1002,38 @@ def test_strategies_endpoint_carries_the_algorithm(env):
 def test_leaderboard_requires_auth(env, path):
     client, *_ = env
     assert client.get(path).status_code == 401
+
+
+# --- 자동 재시작·기록 보존이 화면에 보이는가 ------------------------------
+def test_status_reports_autorestart_so_the_screen_can_show_it(env):
+    client, supervisor, *_ = env
+    body = client.get("/api/status", headers=login(client)).json()
+    assert body["auto_restart"] is False
+
+    supervisor.enable_autorestart(live=False)
+    try:
+        body = client.get("/api/status", headers=login(client)).json()
+        assert body["auto_restart"] is True
+        assert body["auto_restart_live"] is False
+    finally:
+        supervisor.disable_autorestart()
+        supervisor.stop()
+
+
+def test_stop_button_turns_autorestart_off(env):
+    """정지를 눌렀는데 15초 뒤 되살아나면 정지 버튼이 거짓말이 된다."""
+    client, supervisor, *_ = env
+    headers = login(client)
+    supervisor.enable_autorestart(live=False)
+    assert wait_for(lambda: supervisor.running)
+
+    assert client.post("/api/bot/stop", headers=headers).status_code == 200
+    assert supervisor.autorestart is False
+    assert client.get("/api/status", headers=headers).json()["auto_restart"] is False
+
+
+def test_leaderboard_says_whether_records_survive_a_redeploy(env):
+    """며칠치를 모아야 의미가 생기는 데이터다. 날아갈 상태면 화면이 알려야 한다."""
+    client, *_ = env
+    body = client.get("/api/leaderboard", headers=login(client)).json()
+    assert body["persistent"] is False   # 이 테스트 환경에는 저장소가 없다

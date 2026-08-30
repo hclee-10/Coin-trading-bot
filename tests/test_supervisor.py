@@ -301,3 +301,84 @@ def test_unwritable_log_path_does_not_stop_the_server(tmp_path):
     handlers = logging.getLogger().handlers
     assert len(handlers) == 1, "콘솔 핸들러만 남아야 한다"
     logging.getLogger().handlers.clear()
+
+
+# --- 자동 재시작 (감시견) --------------------------------------------------
+def test_autorestart_tick_starts_the_bot_when_it_is_not_running():
+    sup, _ = make_supervisor()
+    sup._want_running = True   # enable_autorestart 의 스레드 없이 로직만 검사
+    try:
+        assert sup.autorestart_tick(now=0.0) is True
+        assert sup.running
+        assert sup.snapshot().auto_restart_count == 1
+    finally:
+        sup.disable_autorestart()
+        sup.stop()
+
+
+def test_autorestart_does_not_start_a_bot_the_user_stopped():
+    """정지 버튼을 눌렀는데 감시견이 되살리면 정지 버튼이 무의미해진다."""
+    sup, _ = make_supervisor()
+    sup.enable_autorestart(live=False)
+    try:
+        assert wait_for(lambda: sup.running)
+        sup.stop()
+        assert sup.autorestart is False
+        assert sup.autorestart_tick(now=10_000.0) is False
+        assert not sup.running
+    finally:
+        sup.disable_autorestart()
+        sup.stop()
+
+
+def test_autorestart_backs_off_when_starting_keeps_failing():
+    """설정이 깨져 매번 실패할 때 15초마다 재시도하면 로그와 레이트리밋만 태운다."""
+    def broken():
+        raise RuntimeError("거래소 접속 실패")
+
+    sup = BotSupervisor(make_config(), exchange_factory=broken, autorestart_interval=10.0)
+    sup._want_running = True
+
+    assert sup.autorestart_tick(now=0.0) is False
+    assert sup._start_failures == 1
+    first_delay = sup._next_attempt_at - 0.0
+
+    # 백오프가 끝나기 전에는 아예 시도하지 않는다
+    assert sup.autorestart_tick(now=first_delay - 1) is False
+    assert sup._start_failures == 1
+
+    assert sup.autorestart_tick(now=first_delay) is False
+    assert sup._start_failures == 2
+    assert sup._next_attempt_at - first_delay > first_delay  # 간격이 벌어졌다
+
+
+def test_autorestart_treats_an_instantly_dying_run_as_a_failure():
+    """떴다가 곧바로 죽는 경우도 실패로 세지 않으면 재시작 루프를 돈다."""
+    sup, _ = make_supervisor()
+    sup._want_running = True
+    sup._last_start_at = 100.0        # 방금 시작했는데
+    assert sup.autorestart_tick(now=101.0) is False   # 1초 만에 죽어 있다
+    assert sup._start_failures == 1
+    assert not sup.running
+
+
+def test_autorestart_is_reported_in_the_snapshot():
+    sup, _ = make_supervisor()
+    sup.enable_autorestart(live=False)
+    try:
+        snap = sup.snapshot()
+        assert snap.auto_restart is True
+        assert snap.auto_restart_live is False
+    finally:
+        sup.disable_autorestart()
+        sup.stop()
+
+
+def test_close_all_positions_turns_autorestart_off():
+    """청산 직후 감시견이 봇을 되살려 재진입하면 긴급 청산의 의미가 없다."""
+    sup, _ = make_supervisor()
+    sup.enable_autorestart(live=False)
+    assert wait_for(lambda: sup.running)
+    sup.close_all_positions()
+    assert sup.autorestart is False
+    assert not sup.running

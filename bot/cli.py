@@ -593,6 +593,79 @@ def _cmd_check_env(args) -> int:
     return 0 if ok else 1
 
 
+# Railway·Fly 등에서 볼륨을 붙이는 관례적인 위치. 환경변수를 따로 넣지 않아도
+# 볼륨만 마운트하면 기록이 재배포를 넘어 살아남게 하려는 것이다.
+VOLUME_CANDIDATES = ("/data", "/mnt/data", "/var/data")
+
+DB_FILENAME = "bot.db"
+
+
+def _writable_dir(path: str) -> bool:
+    return os.path.isdir(path) and os.access(path, os.W_OK)
+
+
+def is_mounted_volume(path: str) -> bool:
+    """이 경로가 진짜 마운트된 볼륨인지.
+
+    디렉터리가 존재하는지만 보면 안 된다. 볼륨을 안 붙여도 코드가 `/data` 를
+    만들어 버리기 때문에, 존재 여부로 판단하면 컨테이너 파일시스템에 쓰면서
+    "잘 저장되고 있다" 고 착각하게 된다. 재배포하면 그대로 날아간다.
+    """
+    return _writable_dir(path) and os.path.ismount(path)
+
+
+def resolve_state_dir(config: Config) -> tuple[str, str, bool]:
+    """기록 DB 를 둘 디렉터리, 그렇게 정한 이유, 재배포를 넘어 남는지.
+
+    우선순위는 STATE_DIR > 마운트된 볼륨 > 로그 디렉터리다. 마지막 것은 컨테이너
+    안이라 재배포하면 사라진다.
+    """
+    explicit = os.getenv("STATE_DIR", "").strip()
+    if explicit:
+        # 사람이 직접 지정한 경로는 볼륨일 것으로 본다. 다만 실제로 마운트돼
+        # 있으면 그렇다고 확실히 말해 준다.
+        durable = is_mounted_volume(explicit) or any(
+            explicit.rstrip("/").startswith(v) and is_mounted_volume(v)
+            for v in VOLUME_CANDIDATES
+        )
+        return explicit, f"STATE_DIR={explicit}", durable
+    log_dir = Path(config.logging.file or ".").parent
+    for candidate in VOLUME_CANDIDATES:
+        if not is_mounted_volume(candidate):
+            continue
+        # 예전에는 로그 디렉터리(볼륨 안의 하위 폴더)에 DB 를 만들었다. 그쪽에
+        # 기록이 이미 쌓여 있으면 그대로 이어 쓴다 — 경로를 바꾸는 바람에
+        # 며칠치 성적이 사라진 것처럼 보이면 안 된다.
+        legacy = log_dir / DB_FILENAME
+        if (
+            not (Path(candidate) / DB_FILENAME).exists()
+            and legacy.exists()
+            and str(log_dir.resolve()).startswith(str(Path(candidate).resolve()))
+        ):
+            return str(log_dir), f"볼륨 {candidate} 안의 기존 기록을 이어서 씁니다", True
+        return candidate, f"마운트된 볼륨 {candidate} 을 자동으로 찾았습니다", True
+    return str(log_dir), "볼륨이 없어 컨테이너 내부에 저장합니다 (재배포하면 사라짐)", False
+
+
+# 자동 시작 설정. 재배포해도 봇이 알아서 다시 켜지게 한다.
+AUTOSTART_ENV = "AUTOSTART"
+
+
+def resolve_autostart() -> tuple[bool, bool]:
+    """(자동 시작 여부, 실거래 여부).
+
+    기본값은 DRY-RUN 자동 시작이다. 모의매매 순위표는 봇 루프가 돌아야 기록되기
+    때문에, 꺼져 있으면 며칠치 데이터가 통째로 비어 버린다. 실거래는 절대
+    기본값이 되지 않는다 — 자기 돈이 걸린 일은 사람이 명시적으로 켜야 한다.
+    """
+    raw = os.getenv(AUTOSTART_ENV, "").strip().lower()
+    if raw in ("off", "0", "false", "no", "none"):
+        return False, False
+    if raw == "live":
+        return True, True
+    return True, False
+
+
 def _log_env_diagnostics(config: Config) -> None:
     """어떤 환경변수가 들어와 있는지 기동 로그에 남긴다.
 
@@ -706,10 +779,20 @@ def _cmd_web(args) -> int:
         )
 
     # 거래 기록 DB. 볼륨(/data)에 두면 재배포해도 살아남는다.
-    state_dir = os.getenv("STATE_DIR", "").strip() or str(Path(config.logging.file or ".").parent)
-    store = Store(Path(state_dir) / "bot.db")
+    state_dir, why, durable = resolve_state_dir(config)
+    store = Store(Path(state_dir) / DB_FILENAME, durable=durable)
+    log.info("기록 DB — %s (%s)", store.path, why)
     if not store.persistent:
         log.warning("거래 기록이 메모리에만 남습니다 — 재시작하면 성과 기록이 사라집니다")
+    elif not store.durable:
+        # 파일은 정상적으로 만들어진다. 다만 그 파일이 컨테이너 안에 있어서
+        # 재배포 한 번에 통째로 사라진다 — 모의매매 성적이 매번 초기화되는
+        # 원인이 대개 이것이고, 쓰기가 성공하니 조용히 지나간다.
+        log.warning(
+            "기록을 컨테이너 내부(%s)에 저장합니다 — 재배포하면 사라집니다. "
+            "Railway 에서 Volume 을 추가하고 마운트 경로를 /data 로 지정하세요.",
+            state_dir,
+        )
 
     supervisor = BotSupervisor(config, store=store)
     app = create_app(
@@ -723,11 +806,21 @@ def _cmd_web(args) -> int:
         startup_error=startup_error,
     )
 
+    # 봇을 자동으로 띄운다. 모의매매 순위표는 봇 루프가 돌아야 기록되므로,
+    # 재배포 때마다 사람이 시작 버튼을 눌러야 한다면 데이터에 구멍이 생긴다.
+    autostart, autostart_live = resolve_autostart()
+    if autostart and startup_error:
+        log.error("설정 오류로 자동 시작을 건너뜁니다 — 화면에서 원인을 확인하세요")
+    elif autostart:
+        supervisor.enable_autorestart(live=autostart_live)
+    else:
+        log.info("%s=off — 봇은 화면에서 직접 시작해야 합니다", AUTOSTART_ENV)
+
     log.info("대시보드 서버 시작 — http://%s:%s", args.host, args.port)
     try:
         uvicorn.run(app, host=args.host, port=args.port, log_config=None, access_log=False)
     finally:
-        supervisor.stop()
+        supervisor.shutdown()
     return 0
 
 

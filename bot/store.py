@@ -106,10 +106,18 @@ class EquityPoint:
 class Store:
     """SQLite 저장소. 여러 스레드에서 안전하게 쓸 수 있다."""
 
-    def __init__(self, path: str | Path | None) -> None:
+    def __init__(self, path: str | Path | None, *, durable: bool = True) -> None:
+        """`durable` 은 이 경로가 **컨테이너 재배포를 넘어** 살아남는지를 뜻한다.
+
+        파일에 쓰는 데 성공하는 것(persistent)과 그 파일이 다음 배포에도 남아
+        있는 것은 다른 문제다. 볼륨 없이 컨테이너 안에 쓰면 기록은 멀쩡히
+        저장되지만 재배포 한 번에 통째로 사라진다 — 경고 없이 며칠치 모의매매
+        성적을 잃는 경로가 바로 이것이다.
+        """
         self._lock = threading.Lock()
         self.path = str(path) if path else ":memory:"
         self.persistent = self.path != ":memory:"
+        self.durable = bool(durable) and self.persistent
 
         if self.persistent:
             try:
@@ -121,7 +129,7 @@ class Store:
                     "(재시작하면 사라집니다): %s",
                     self.path, exc,
                 )
-                self.path, self.persistent = ":memory:", False
+                self.path, self.persistent, self.durable = ":memory:", False, False
                 connection = sqlite3.connect(":memory:", check_same_thread=False)
         else:
             connection = sqlite3.connect(":memory:", check_same_thread=False)

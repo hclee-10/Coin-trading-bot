@@ -36,6 +36,11 @@ log = logging.getLogger(__name__)
 
 ExchangeFactory = Callable[[], FuturesExchange]
 
+# 이 시간보다 짧게 살다 죽은 실행은 "정상 기동" 으로 치지 않는다. 설정이
+# 잘못돼 매 주기 죽는 상황에서 감시견이 무한 재시작 루프를 도는 것을 막는다.
+MIN_HEALTHY_RUN_SEC = 120.0
+MAX_RESTART_BACKOFF_SEC = 300.0
+
 
 class SupervisorError(Exception):
     """봇을 시작/정지할 수 없는 상태."""
@@ -84,6 +89,11 @@ class StatusSnapshot:
     halted: bool = False
     halt_reason: str = ""
     last_error: str | None = None
+    # 자동 재시작(감시견) 상태. 재배포·크래시 뒤에도 계속 돌고 있는지 화면에서
+    # 확인할 수 있어야 한다.
+    auto_restart: bool = False
+    auto_restart_live: bool = False
+    auto_restart_count: int = 0
     positions: list[PositionView] = field(default_factory=list)
 
 
@@ -99,6 +109,7 @@ class BotSupervisor:
         positions_cache_ttl: float = 5.0,
         positions_error_cache_ttl: float = 15.0,
         store: Store | None = None,
+        autorestart_interval: float = 15.0,
     ) -> None:
         self.config = config
         self.store = store
@@ -126,6 +137,21 @@ class BotSupervisor:
         # 봇이 멈춰 있을 때의 차트용 캔들 캐시. 포지션과 같은 이유로 캐시한다.
         self._candles_cache: dict[str, tuple[float, list[dict[str, float]]]] = {}
         self._candles_lock = threading.Lock()
+        # 자동 재시작. "돌고 있어야 한다" 는 의사(_want_running)를 따로 두고,
+        # 감시견 스레드가 실제 상태를 거기에 맞춘다. 재배포로 프로세스가 새로
+        # 뜨거나 봇 스레드가 예외로 죽어도 모의매매가 계속 기록되게 하는 장치다.
+        #
+        # 대시보드의 정지 버튼과 긴급 청산은 이 의사를 끈다 — 끄자마자 15초 뒤
+        # 되살아나면 정지 버튼이 아무 의미가 없다.
+        self._autorestart_interval = autorestart_interval
+        self._want_running = False
+        self._want_live = False
+        self._watchdog: threading.Thread | None = None
+        self._watchdog_stop = threading.Event()
+        self._autorestart_count = 0
+        self._start_failures = 0
+        self._next_attempt_at = 0.0
+        self._last_start_at: float | None = None
 
     # ------------------------------------------------------------------
     @property
@@ -138,6 +164,11 @@ class BotSupervisor:
         with self._lock:
             if self.running:
                 raise SupervisorError("봇이 이미 실행 중입니다")
+            # 여기서 먼저 기록해 둔다. 거래소 접속이 실패해도 감시견이 계속
+            # 재시도해야 하기 때문이다 — 부팅 직후 네트워크가 늦게 뜨는 경우.
+            self._want_running = True
+            self._want_live = live
+            self._last_start_at = time.monotonic()
             exchange = self._exchange_factory()
             engine = TradingEngine(
                 self.config, exchange, dry_run=not live, store=self.store, arena=self.arena
@@ -168,6 +199,8 @@ class BotSupervisor:
         엔진은 현재 주기를 마치고 멈추므로, 폴링 주기만큼은 걸릴 수 있다.
         """
         with self._lock:
+            # 사람이 멈춘 것은 "이제 돌지 말라" 는 뜻이다. 감시견이 되살리지 않는다.
+            self._want_running = False
             engine, thread = self._engine, self._thread
             if engine is None or thread is None or not thread.is_alive():
                 self._thread = None
@@ -181,6 +214,106 @@ class BotSupervisor:
         else:
             log.error("봇 스레드가 제한 시간 안에 멈추지 않았습니다")
         return stopped
+
+    # --- 자동 재시작 ---------------------------------------------------
+    def enable_autorestart(self, *, live: bool = False) -> None:
+        """프로세스가 사는 동안 봇이 계속 돌아가게 한다.
+
+        곧바로 start() 를 부르지 않고 감시견에게 맡긴다. 거래소 접속이 느리거나
+        실패해도 웹 서버가 뜨는 것을 막지 않기 위해서다 — 화면조차 안 뜨면
+        무엇이 잘못됐는지 볼 방법이 없다.
+        """
+        self._want_running = True
+        self._want_live = live
+        self._next_attempt_at = 0.0
+        self._start_failures = 0
+        if self._watchdog is not None and self._watchdog.is_alive():
+            return
+        self._watchdog_stop.clear()
+        thread = threading.Thread(
+            target=self._watchdog_loop, name="bot-watchdog", daemon=True
+        )
+        self._watchdog = thread
+        thread.start()
+        log.warning(
+            "자동 재시작 켜짐 — %s 모드로 계속 돌립니다 (%.0f초마다 확인)",
+            "실거래" if live else "DRY-RUN",
+            self._autorestart_interval,
+        )
+
+    def disable_autorestart(self) -> None:
+        """감시견을 끈다. 봇 자체는 건드리지 않는다."""
+        self._want_running = False
+        self._watchdog_stop.set()
+        self._watchdog = None
+
+    @property
+    def autorestart(self) -> bool:
+        return self._want_running
+
+    def _watchdog_loop(self) -> None:
+        # 첫 확인은 기다리지 않고 바로 한다.
+        while True:
+            try:
+                self.autorestart_tick()
+            except Exception:  # 감시견은 어떤 이유로도 죽으면 안 된다
+                log.exception("자동 재시작 확인 중 오류")
+            if self._watchdog_stop.wait(self._autorestart_interval):
+                return
+
+    def autorestart_tick(self, *, now: float | None = None) -> bool:
+        """필요하면 봇을 다시 띄운다. 실제로 시작했으면 True.
+
+        테스트에서 시간을 넣어 부를 수 있도록 공개 메서드로 둔다.
+        """
+        if not self._want_running or self.running:
+            return False
+        clock = time.monotonic() if now is None else now
+        if clock < self._next_attempt_at:
+            return False
+
+        # 방금 띄웠는데 벌써 죽어 있다면 설정이나 거래소 쪽 문제다. 실패로 세어
+        # 간격을 벌린다 — 15초마다 재시작을 반복하면 로그만 지저분해지고
+        # 거래소 레이트리밋만 태운다.
+        if (
+            self._last_start_at is not None
+            and clock - self._last_start_at < MIN_HEALTHY_RUN_SEC
+        ):
+            self._note_start_failure(clock, self._start_error or "봇 스레드가 곧바로 종료됨")
+            return False
+
+        want_live = self._want_live
+        try:
+            self.start(live=want_live)
+        except Exception as exc:
+            self._note_start_failure(clock, str(exc))
+            return False
+
+        self._start_failures = 0
+        self._autorestart_count += 1
+        log.warning(
+            "봇 자동 시작 (%d회째) — %s 모드",
+            self._autorestart_count, "실거래" if want_live else "DRY-RUN",
+        )
+        return True
+
+    def _note_start_failure(self, clock: float, reason: str) -> None:
+        self._start_failures += 1
+        delay = min(
+            MAX_RESTART_BACKOFF_SEC,
+            self._autorestart_interval * (2 ** min(self._start_failures, 5)),
+        )
+        self._next_attempt_at = clock + delay
+        self._last_start_at = None
+        log.error(
+            "봇 자동 시작 실패 (%d회) — %.0f초 뒤 다시 시도합니다: %s",
+            self._start_failures, delay, reason,
+        )
+
+    def shutdown(self) -> None:
+        """프로세스 종료용. 감시견을 끄고 봇을 멈춘다."""
+        self.disable_autorestart()
+        self.stop()
 
     # ------------------------------------------------------------------
     def snapshot(self) -> StatusSnapshot:
@@ -197,6 +330,9 @@ class BotSupervisor:
             leverage=cfg.exchange.leverage,
             quote_currency=cfg.trading.quote_currency,
             last_error=self._start_error,
+            auto_restart=self._want_running,
+            auto_restart_live=self._want_live,
+            auto_restart_count=self._autorestart_count,
         )
         if engine is None:
             return snapshot
@@ -364,6 +500,9 @@ class BotSupervisor:
         먼저 멈추는 이유는 두 가지다 — 거래소 객체를 두 스레드가 동시에 만지지
         않게 하고, 청산 직후 봇이 곧바로 재진입하는 것을 막기 위해서다.
         """
+        # 긴급 청산 뒤에 감시견이 봇을 되살려 곧바로 재진입하면 청산의 의미가
+        # 없다. 다시 돌리려면 사람이 직접 시작 버튼을 눌러야 한다.
+        self.disable_autorestart()
         was_running = self.running
         if was_running and not self.stop():
             raise SupervisorError(

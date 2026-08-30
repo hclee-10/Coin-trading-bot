@@ -2,7 +2,7 @@
 
 import pytest
 
-from bot.cli import build_parser
+from bot.cli import build_parser, resolve_autostart, resolve_state_dir
 
 RAILWAY_VARS = ("RAILWAY_ENVIRONMENT", "RAILWAY_ENVIRONMENT_NAME",
                 "RAILWAY_PROJECT_ID", "RAILWAY_SERVICE_ID")
@@ -10,7 +10,8 @@ RAILWAY_VARS = ("RAILWAY_ENVIRONMENT", "RAILWAY_ENVIRONMENT_NAME",
 
 @pytest.fixture(autouse=True)
 def clean_env(monkeypatch):
-    for name in RAILWAY_VARS + ("PORT", "TRUST_PROXY", "PROXY_HOPS"):
+    for name in RAILWAY_VARS + ("PORT", "TRUST_PROXY", "PROXY_HOPS",
+                                "STATE_DIR", "AUTOSTART"):
         monkeypatch.delenv(name, raising=False)
 
 
@@ -120,3 +121,109 @@ def test_check_env_never_prints_values(monkeypatch, capsys):
     main(["check-env"])
 
     assert secret not in capsys.readouterr().out
+
+
+# --- 기록을 둘 곳 ----------------------------------------------------------
+def make_config(log_file="logs/bot.log"):
+    from bot.config import Config
+    config = Config()
+    config.logging.file = log_file
+    return config
+
+
+def test_state_dir_prefers_an_explicit_env_var(monkeypatch, tmp_path):
+    monkeypatch.setenv("STATE_DIR", str(tmp_path))
+    path, why, _ = resolve_state_dir(make_config())
+    assert path == str(tmp_path)
+    assert "STATE_DIR" in why
+
+
+def test_state_dir_finds_a_mounted_volume_without_any_env_var(monkeypatch, tmp_path):
+    """볼륨만 붙이면 변수 없이도 기록이 살아남아야 한다 — 설정 하나를 빠뜨려
+    며칠치 모의매매가 날아가는 것이 실제로 일어난 사고다."""
+    volume = tmp_path / "data"
+    volume.mkdir()
+    monkeypatch.setattr("bot.cli.VOLUME_CANDIDATES", (str(volume),))
+    monkeypatch.setattr("bot.cli.os.path.ismount", lambda p: p == str(volume))
+    path, why, durable = resolve_state_dir(make_config())
+    assert path == str(volume)
+    assert "볼륨" in why
+    assert durable is True
+
+
+def test_an_unmounted_data_directory_is_not_treated_as_a_volume(monkeypatch, tmp_path):
+    """볼륨을 안 붙여도 /data 디렉터리 자체는 만들어진다. 존재만 보고 판단하면
+    컨테이너 안에 쓰면서 잘 저장되고 있다고 착각하게 된다."""
+    fake_volume = tmp_path / "data"
+    fake_volume.mkdir()          # 존재하고 쓸 수도 있지만 마운트는 아니다
+    monkeypatch.setattr("bot.cli.VOLUME_CANDIDATES", (str(fake_volume),))
+    monkeypatch.setattr("bot.cli.os.path.ismount", lambda p: False)
+    path, why, durable = resolve_state_dir(make_config("logs/bot.log"))
+    assert path == "logs"
+    assert durable is False
+    assert "재배포하면 사라짐" in why
+
+
+def test_state_dir_falls_back_to_the_log_directory_and_says_so(monkeypatch):
+    monkeypatch.setattr("bot.cli.VOLUME_CANDIDATES", ("/definitely-not-mounted-xyz",))
+    path, why, durable = resolve_state_dir(make_config("logs/bot.log"))
+    assert path == "logs"
+    assert "볼륨이 없어" in why
+    assert durable is False
+
+
+# --- 자동 시작 -------------------------------------------------------------
+def test_autostart_defaults_to_dry_run():
+    """순위표는 봇이 돌아야 기록된다. 기본이 꺼짐이면 데이터에 구멍이 난다."""
+    assert resolve_autostart() == (True, False)
+
+
+def test_autostart_live_requires_an_explicit_opt_in(monkeypatch):
+    monkeypatch.setenv("AUTOSTART", "live")
+    assert resolve_autostart() == (True, True)
+
+
+@pytest.mark.parametrize("value", ["off", "0", "false", "no", "none", "OFF"])
+def test_autostart_can_be_turned_off(monkeypatch, value):
+    monkeypatch.setenv("AUTOSTART", value)
+    assert resolve_autostart() == (False, False)
+
+
+def test_an_unknown_autostart_value_is_dry_run_not_live(monkeypatch):
+    """오타가 실거래를 켜는 일은 없어야 한다."""
+    monkeypatch.setenv("AUTOSTART", "yes")
+    assert resolve_autostart() == (True, False)
+
+
+def test_a_store_on_a_container_path_reports_itself_as_not_durable(tmp_path):
+    """쓰기에 성공하는 것과 재배포를 넘어 남는 것은 다른 문제다."""
+    from bot.store import Store
+
+    store = Store(tmp_path / "bot.db", durable=False)
+    assert store.persistent is True    # 파일에는 정상적으로 쓴다
+    assert store.durable is False      # 하지만 재배포하면 사라진다
+
+
+def test_an_existing_db_inside_the_volume_is_not_orphaned(monkeypatch, tmp_path):
+    """DB 경로를 옮기는 바람에 이미 쌓인 기록이 사라진 것처럼 보이면 안 된다."""
+    volume = tmp_path / "data"
+    (volume / "logs").mkdir(parents=True)
+    (volume / "logs" / "bot.db").write_text("")   # 예전 위치에 기록이 있다
+    monkeypatch.setattr("bot.cli.VOLUME_CANDIDATES", (str(volume),))
+    monkeypatch.setattr("bot.cli.os.path.ismount", lambda p: p == str(volume))
+
+    path, why, durable = resolve_state_dir(make_config(str(volume / "logs" / "bot.log")))
+    assert path == str(volume / "logs")
+    assert durable is True
+    assert "이어서" in why
+
+
+def test_a_fresh_volume_gets_the_db_at_its_root(monkeypatch, tmp_path):
+    volume = tmp_path / "data"
+    (volume / "logs").mkdir(parents=True)
+    monkeypatch.setattr("bot.cli.VOLUME_CANDIDATES", (str(volume),))
+    monkeypatch.setattr("bot.cli.os.path.ismount", lambda p: p == str(volume))
+
+    path, _, durable = resolve_state_dir(make_config(str(volume / "logs" / "bot.log")))
+    assert path == str(volume)
+    assert durable is True

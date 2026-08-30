@@ -97,6 +97,24 @@ export default function Controls({ status, busy, onStart, onStop, onCloseAll }) 
             새 전략은 여기서 먼저 관찰하세요.
           </p>
         )}
+
+        {/* 정지 버튼을 눌러도 15초 뒤 되살아나면 버그로 보인다 — 그렇지 않다는
+            것과, 반대로 자동 재시작이 꺼졌다는 것을 둘 다 알려 준다. */}
+        <p className="hint" style={{ marginTop: 12, marginBottom: 0 }}>
+          {status.auto_restart ? (
+            <>
+              <strong style={{ color: 'var(--green)' }}>자동 재시작 켜짐</strong> — 재배포하거나
+              봇이 죽어도 {status.auto_restart_live ? '실거래' : 'DRY-RUN'} 모드로 다시 켜집니다.
+              {status.auto_restart_count > 0 && ` (자동 시작 ${status.auto_restart_count}회)`}
+              {' '}정지 버튼을 누르면 꺼집니다.
+            </>
+          ) : (
+            <>
+              <strong className="warn-text">자동 재시작 꺼짐</strong> — 지금 멈추면 재배포 전까지
+              모의매매 기록이 쌓이지 않습니다. 다시 켜려면 시작 버튼을 누르세요.
+            </>
+          )}
+        </p>
       </div>
     </section>
   )

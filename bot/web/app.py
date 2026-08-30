@@ -297,6 +297,9 @@ def create_app(
         return {
             "active": config.strategy.name,
             "leverage": config.exchange.leverage,
+            # 기록이 볼륨에 남는지. False 면 재배포 때마다 성적이 초기화되므로
+            # 며칠씩 모아야 하는 이 데이터에서는 치명적이다 — 화면에서 경고한다.
+            "persistent": supervisor.store.durable if supervisor.store else False,
             "strategies": [
                 {
                     "name": s.name,
@@ -400,7 +403,7 @@ def create_app(
             "equity_change": performance.equity_change,
             "total_return_pct": performance.total_return_pct,
             "started_at": performance.started_at,
-            "persistent": bool(supervisor.store and supervisor.store.persistent),
+            "persistent": bool(supervisor.store and supervisor.store.durable),
             "trades": [
                 {
                     "symbol": t.symbol,
