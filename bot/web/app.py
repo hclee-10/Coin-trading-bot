@@ -56,7 +56,7 @@ def create_app(
     config: Config,
     supervisor: BotSupervisor,
     log_buffer: LogBuffer,
-    account: Account,
+    account: Account | None,  # None = 계정 미설정. 로그인이 전부 거부된다.
     *,
     static_dir: Path | None = None,
     token_store: TokenStore | None = None,
@@ -128,6 +128,15 @@ def create_app(
     @app.post("/api/login")
     def login(body: LoginRequest, request: Request) -> dict:
         ip = client_ip(request)
+        if account is None:
+            # 계정이 없으면 아무도 로그인할 수 없다. 죽은 사이트를 보여 주는
+            # 대신 로그인 화면에서 원인을 알려 준다 — 제어권이 열리는 것은 아니다.
+            log.error("로그인 시도했으나 서버에 계정이 설정되어 있지 않습니다 — ip=%s", ip)
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="서버에 로그인 계정이 설정되지 않았습니다. "
+                "WEB_USERNAME 과 WEB_PASSWORD_HASH 환경변수를 확인하세요.",
+            )
         locked = login_throttle.locked_for(ip)
         if locked > 0:
             log.warning("로그인 잠금 상태에서 시도 — ip=%s 남은 %.0f초", ip, locked)

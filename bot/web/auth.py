@@ -50,6 +50,26 @@ def hash_password(password: str) -> str:
     return f"scrypt${_SCRYPT_N}${_SCRYPT_R}${_SCRYPT_P}${salt.hex()}${digest.hex()}"
 
 
+def is_valid_password_hash(encoded: str) -> bool:
+    """저장된 해시가 구조적으로 온전한지 확인한다.
+
+    접두사만 보면 부족하다. `WEB_PASSWORD_HASH` 는 `scrypt$32768$8$1$...` 처럼
+    `$` 가 많은 값이라 셸을 거쳐 설정하면 변수 확장으로 중간이 날아가기 쉬운데,
+    그래도 `scrypt$` 로는 시작하기 때문이다. 그 상태를 통과시키면 사용자는
+    "비밀번호가 틀렸다"는 메시지만 보고 원인을 영영 못 찾는다.
+    """
+    parts = encoded.split("$")
+    if len(parts) != 6 or parts[0] != "scrypt":
+        return False
+    scheme_n, scheme_r, scheme_p, salt_hex, hash_hex = parts[1:]
+    try:
+        if not all(int(v) > 0 for v in (scheme_n, scheme_r, scheme_p)):
+            return False
+        return bool(bytes.fromhex(salt_hex)) and bool(bytes.fromhex(hash_hex))
+    except ValueError:
+        return False
+
+
 def verify_password(password: str, encoded: str) -> bool:
     """저장된 해시와 대조한다. 형식이 깨져 있으면 조용히 False."""
     try:
@@ -102,10 +122,12 @@ def load_account() -> Account:
             f"{', '.join(missing)} 가 설정되지 않았습니다. "
             "`python -m bot hash-password` 로 아이디와 해시를 만들어 환경변수에 넣으세요."
         )
-    if not encoded.startswith("scrypt$"):
+    if not is_valid_password_hash(encoded):
         raise AuthError(
             f"{PASSWORD_ENV} 형식이 올바르지 않습니다. "
-            "비밀번호 원문이 아니라 `python -m bot hash-password` 의 출력이어야 합니다."
+            "`python -m bot hash-password` 의 출력을 그대로 넣어야 합니다 "
+            "(scrypt$n$r$p$salt$hash 형태). 값에 '$' 가 많아 셸을 거치면 깨질 수 "
+            "있으니, 웹 콘솔에 직접 붙여넣거나 작은따옴표로 감싸세요."
         )
     return Account(username=username, password_hash=encoded)
 

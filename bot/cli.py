@@ -291,7 +291,7 @@ def _cmd_hash_password() -> int:
 
     비밀번호 원문은 화면에 찍히지 않고 어디에도 저장되지 않는다.
     """
-    from bot.web.auth import PASSWORD_ENV, USERNAME_ENV, AuthError, hash_password
+    from bot.web.auth import PASSWORD_ENV, USERNAME_ENV, is_valid_password_hash, AuthError, hash_password
 
     try:
         username = input("웹 대시보드 아이디: ").strip()
@@ -317,6 +317,35 @@ def _cmd_hash_password() -> int:
     return 0
 
 
+def _log_env_diagnostics(config: Config) -> None:
+    """어떤 환경변수가 들어와 있는지 기동 로그에 남긴다.
+
+    배포 환경에서 변수 하나가 빠지거나 이름이 틀렸을 때, 값을 노출하지 않고도
+    무엇이 문제인지 로그만 보고 알 수 있어야 한다. **값은 절대 찍지 않는다.**
+    """
+    from bot.config import passphrase_required
+    from bot.web.auth import PASSWORD_ENV, USERNAME_ENV, is_valid_password_hash
+
+    prefix = config.exchange.id.upper()
+    names = [USERNAME_ENV, PASSWORD_ENV, "CONFIG_YAML",
+             f"{prefix}_API_KEY", f"{prefix}_API_SECRET"]
+    if passphrase_required(config.exchange.id):
+        names.append(f"{prefix}_API_PASSPHRASE")
+
+    report = []
+    for name in names:
+        value = os.getenv(name, "")
+        if not value.strip():
+            state = "없음"
+        elif name == PASSWORD_ENV and not is_valid_password_hash(value):
+            # $ 가 많은 값이라 셸을 거치면 변수 확장으로 중간이 날아가기 쉽다.
+            state = "형식 깨짐(hash-password 출력을 그대로 넣으세요)"
+        else:
+            state = "설정됨"
+        report.append(f"{name}={state}")
+    log.info("환경변수 점검 — %s", ", ".join(report))
+
+
 def _cmd_web(args) -> int:
     """웹 대시보드 서버를 실행한다.
 
@@ -325,8 +354,9 @@ def _cmd_web(args) -> int:
     문제가 생겼을 때 아무것도 안 보이고 배포 로그를 뒤져야 한다. 문제는
     화면에 띄우고, 그 상태에서는 봇 시작을 막는다.
 
-    다만 로그인 계정만은 예외다. 계정 없이 서버를 띄우면 인터넷에 인증 없는
-    제어판을 여는 셈이라, 이때는 뜨지 않는 쪽이 맞다.
+    로그인 계정이 없을 때도 마찬가지로 뜬다. 계정이 없으면 애초에 로그인이
+    성공할 수 없어 제어권이 열리지 않는다 — 죽은 사이트를 남기는 것보다 로그인
+    화면에서 원인을 알려 주는 편이 낫다.
     """
     import uvicorn
 
@@ -335,13 +365,14 @@ def _cmd_web(args) -> int:
     from bot.web.auth import AuthError, load_account
     from bot.web.supervisor import BotSupervisor
 
+    startup_error: str | None = None
+
+    account = None
     try:
         account = load_account()
     except AuthError as exc:
-        print(f"인증 설정 오류: {exc}", file=sys.stderr)
-        return 2
+        startup_error = f"로그인 계정 오류: {exc}"
 
-    startup_error: str | None = None
     try:
         config = Config.load(args.config)
     except ConfigError as exc:
@@ -364,6 +395,7 @@ def _cmd_web(args) -> int:
         except ConfigError as exc:
             startup_error = f"거래소 자격증명 오류: {exc}"
 
+    _log_env_diagnostics(config)
     if startup_error:
         log.error("%s — 대시보드는 뜨지만 봇은 시작할 수 없습니다", startup_error)
 

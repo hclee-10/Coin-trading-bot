@@ -389,3 +389,66 @@ def test_live_start_is_blocked_too_even_with_the_confirmation(broken_env):
 def test_healthy_server_reports_no_startup_error(env):
     client, *_ = env
     assert client.get("/api/status", headers=login(client)).json()["startup_error"] is None
+
+
+# --- 계정 미설정 ----------------------------------------------------------
+def test_server_serves_without_an_account_but_refuses_every_login():
+    """계정이 없어도 사이트는 떠야 한다 — 로그인이 불가능하니 제어권은 안 열린다."""
+    exchange = FakeExchange()
+    config = make_config()
+    app = create_app(
+        config,
+        BotSupervisor(config, exchange_factory=lambda: exchange),
+        LogBuffer(capacity=10),
+        None,  # 계정 미설정
+        startup_error="로그인 계정 오류: WEB_PASSWORD_HASH 가 설정되지 않았습니다",
+    )
+    client = TestClient(app)
+
+    assert client.get("/healthz").status_code == 200
+
+    response = client.post(
+        "/api/login", json={"username": "anyone", "password": "anything"}
+    )
+    assert response.status_code == 503
+    assert "WEB_USERNAME" in response.json()["detail"]
+
+    # 제어 엔드포인트는 여전히 잠겨 있다
+    assert client.get("/api/status").status_code == 401
+    assert client.post("/api/bot/start", json={"live": False}).status_code == 401
+    assert exchange.sent_orders == []
+
+
+# --- 해시 형식 검증 -------------------------------------------------------
+@pytest.mark.parametrize(
+    "label,encoded",
+    [
+        ("셸 변수 확장으로 중간이 날아감", "scrypt$$$"),
+        ("끝이 잘림", "scrypt$32768$8$1$abcd"),
+        ("접두사만 남음", "scrypt$"),
+        ("비밀번호 원문을 그대로 넣음", "my-plain-password"),
+        ("16진수가 아님", "scrypt$32768$8$1$zzzz$zzzz"),
+        ("파라미터가 0", "scrypt$0$8$1$abcd$abcd"),
+    ],
+)
+def test_broken_password_hashes_are_rejected(label, encoded):
+    """접두사만 보면 셸에서 깨진 해시를 통과시켜, 원인이 '비밀번호 오류'로 보인다."""
+    from bot.web.auth import is_valid_password_hash
+
+    assert is_valid_password_hash(encoded) is False, label
+
+
+def test_a_real_hash_is_accepted():
+    from bot.web.auth import is_valid_password_hash
+
+    assert is_valid_password_hash(hash_password("correct-horse-battery")) is True
+
+
+def test_broken_hash_env_fails_loudly_instead_of_looking_like_a_wrong_password(monkeypatch):
+    from bot.web.auth import AuthError, load_account
+
+    monkeypatch.setenv("WEB_USERNAME", "trader")
+    monkeypatch.setenv("WEB_PASSWORD_HASH", "scrypt$$$")
+
+    with pytest.raises(AuthError, match=r"\$"):
+        load_account()
