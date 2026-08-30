@@ -236,3 +236,47 @@ def test_first_history_sync_happens_even_soon_after_boot(monkeypatch):
     engine.run_cycle()
 
     assert ex.trade_queries == 1
+
+
+class MtfScriptedStrategy(ScriptedStrategy):
+    """상위 시간대를 선언하는 테스트 전략."""
+
+    extra_timeframes = ("1h", "4h")
+
+
+class CandleRecordingExchange(FakeExchange):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.candle_requests: list[str] = []
+
+    def fetch_candles(self, symbol, timeframe, limit, since=None):
+        self.candle_requests.append(timeframe)
+        return super().fetch_candles(symbol, timeframe, limit, since)
+
+
+def test_engine_supplies_declared_higher_timeframes():
+    """전략이 extra_timeframes 를 선언하면 그 캔들이 컨텍스트로 들어와야 한다."""
+    ex = CandleRecordingExchange(price=100.0, equity=10_000.0)
+    strategy = MtfScriptedStrategy([Signal(), Signal()])
+    engine = TradingEngine(make_config(), ex, dry_run=True, strategy=strategy)
+
+    engine.run_cycle()
+    engine.run_cycle()
+
+    ctx = strategy.seen[-1]
+    assert set(ctx.mtf_candles) == {"1h", "4h"}
+    assert ctx.mtf_candles["1h"], "상위 시간대 캔들이 비어 있습니다"
+    # 상위 봉은 느리게 바뀐다 — 60초 캐시 안에서는 다시 받지 않는다.
+    assert ex.candle_requests.count("1h") == 1
+    assert ex.candle_requests.count("4h") == 1
+
+
+def test_engine_skips_mtf_fetch_when_nothing_declares_it():
+    ex = CandleRecordingExchange(price=100.0, equity=10_000.0)
+    strategy = ScriptedStrategy([Signal()])
+    engine = TradingEngine(make_config(), ex, dry_run=True, strategy=strategy)
+
+    engine.run_cycle()
+
+    assert strategy.seen[-1].mtf_candles == {}
+    assert all(tf == "5m" for tf in ex.candle_requests)

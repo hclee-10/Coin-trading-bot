@@ -22,11 +22,12 @@ def series(closes, *, wick=0.15):
     return candles
 
 
-def context(candles, position=None, equity=10_000.0):
+def context(candles, position=None, equity=10_000.0, mtf=None):
     return StrategyContext(
         symbol=SYMBOL, timeframe="5m", candles=candles,
         ticker=Ticker(symbol=SYMBOL, last=candles[-1].close, bid=None, ask=None, timestamp=0),
         position=position or Position.flat(SYMBOL), equity=equity,
+        mtf_candles=mtf or {},
     )
 
 
@@ -252,6 +253,66 @@ def test_macd_rsi_does_not_chase_an_overbought_turn():
         if signal.is_entry:
             # 진입했다면 그 시점 RSI 는 과열이 아니었어야 한다
             assert "여유" in signal.reason
+
+
+def test_ichimoku_cloud_needs_a_real_breakout():
+    """구름 안에서의 등락은 신호가 아니다."""
+    strategy = get_strategy("ichimoku_cloud")
+    flat = series([100.0] * 130, wick=3.0)  # 두꺼운 범위 안에서 횡보
+
+    assert not strategy.generate(context(flat)).is_entry
+
+
+def test_ichimoku_cloud_enters_on_a_cloud_breakout():
+    strategy = get_strategy("ichimoku_cloud")
+    closes = [100.0] * 110 + [100 + i * 0.8 for i in range(14)]
+
+    actions = []
+    candles = series(closes)
+    for end in range(105, len(candles)):
+        actions.append(strategy.generate(context(candles[:end])).action)
+
+    assert SignalAction.ENTER_LONG in actions
+
+
+def test_ichimoku_mtf_respects_the_higher_timeframe_cloud():
+    """일봉 구름이 반대편이면 기본 시간대 돌파가 나와도 들어가지 않는다.
+
+    가중치가 기본 1 vs 일봉 4 라서, 일봉의 반대 신호가 합의를 음수로 끌어내린다.
+    """
+    solo = get_strategy("ichimoku_mtf")
+    vetoed = get_strategy("ichimoku_mtf")
+    base = series([100.0] * 115 + [100 + i * 0.8 for i in range(14)])
+    daily_down = series([400 - i for i in range(140)])  # 구름 아래로 꾸준한 하락
+
+    entered_alone = entered_vetoed = False
+    for end in range(110, len(base)):
+        if solo.generate(context(base[:end])).is_entry:
+            entered_alone = True
+        if vetoed.generate(context(base[:end], mtf={"1d": daily_down})).is_entry:
+            entered_vetoed = True
+
+    assert entered_alone, "기본 시간대 단독으로는 진입했어야 합니다"
+    assert not entered_vetoed, "일봉 구름이 반대인데 진입했습니다"
+
+
+def test_ichimoku_mtf_conviction_grows_with_agreement():
+    """상위 시간대가 같은 방향으로 강하게 동의하면 확신이 올라간다."""
+    alone = get_strategy("ichimoku_mtf")
+    backed = get_strategy("ichimoku_mtf")
+    base = series([100.0] * 115 + [100 + i * 0.8 for i in range(14)])
+    daily_up = series([100 + i for i in range(140)])  # 구름 위로 꾸준한 상승
+
+    best_alone = best_backed = 0.0
+    for end in range(110, len(base)):
+        s1 = alone.generate(context(base[:end]))
+        s2 = backed.generate(context(base[:end], mtf={"1d": daily_up}))
+        if s1.is_entry:
+            best_alone = max(best_alone, s1.strength)
+        if s2.is_entry:
+            best_backed = max(best_backed, s2.strength)
+
+    assert best_backed > best_alone
 
 
 def test_exit_signals_never_carry_a_size():

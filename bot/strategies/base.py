@@ -8,10 +8,11 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Callable, Type
 
 from bot.models import Candle, Position, Signal, Ticker
+from bot.timeframes import resample, timeframe_to_ms
 
 
 @dataclass(frozen=True)
@@ -24,6 +25,9 @@ class StrategyContext:
     ticker: Ticker
     position: Position
     equity: float           # 선물 계좌 총 자기자본(견적통화 기준)
+    # 상위 시간대 캔들 ("1h" → 캔들 목록). 전략이 `extra_timeframes` 를 선언하면
+    # 엔진이 거래소에서 받아 채워 준다. 마지막 캔들은 진행 중일 수 있다.
+    mtf_candles: dict[str, list[Candle]] = field(default_factory=dict)
 
     @property
     def last_price(self) -> float:
@@ -38,6 +42,23 @@ class StrategyContext:
         """
         return self.candles[:-1] if self.candles else []
 
+    def closed_candles_for(self, timeframe: str) -> list[Candle]:
+        """해당 시간대의 확정 캔들.
+
+        우선순위: ① 기본 시간대와 같으면 `closed_candles` 그대로 ② 엔진이
+        공급한 `mtf_candles` (마지막 미완성 봉 제외) ③ 기본 시간대 캔들을
+        리샘플해 근사 — 공급이 없는 백테스트에서의 폴백이다.
+
+        데이터가 모자라면 짧은(혹은 빈) 목록이 돌아온다. 다중 시간대 전략은
+        이를 "그 시간대는 판단 불가"로 다뤄야지, 죽으면 안 된다.
+        """
+        if timeframe_to_ms(timeframe) == timeframe_to_ms(self.timeframe):
+            return self.closed_candles
+        supplied = self.mtf_candles.get(timeframe)
+        if supplied:
+            return supplied[:-1]
+        return resample(self.closed_candles, timeframe, complete_only=True)
+
 
 class Strategy(ABC):
     """모든 전략의 베이스 클래스."""
@@ -51,6 +72,9 @@ class Strategy(ABC):
     algorithm: str = ""
     # trend | reversion | breakout | combo | range
     category: str = "other"
+    # 이 전략이 추가로 필요로 하는 상위 시간대 (예: ("1h", "4h", "1d")).
+    # 선언하면 엔진이 거래소에서 받아 StrategyContext.mtf_candles 로 넣어 준다.
+    extra_timeframes: tuple[str, ...] = ()
 
     def __init__(self, params: dict[str, Any] | None = None) -> None:
         self.params = params or {}

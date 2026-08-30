@@ -6,9 +6,9 @@
 import pytest
 
 from bot.indicators import (
-    adx, atr, bollinger, cci, donchian, ema, heikin_ashi, highest, ichimoku, keltner,
-    lowest, macd, mfi, obv, psar, roc, rolling_vwap, rsi, sma, stddev, stochastic,
-    supertrend, williams_r,
+    adx, atr, bollinger, cci, donchian, ema, heikin_ashi, highest, ichimoku,
+    ichimoku_cloud, keltner, lowest, macd, mfi, obv, psar, roc, rolling_vwap, rsi,
+    sma, stddev, stochastic, supertrend, williams_r,
 )
 from bot.models import Candle
 
@@ -229,3 +229,19 @@ def test_ichimoku_stalls_inside_the_range():
     rows = [(110, 90, 95 + (i % 10)) for i in range(40)]  # 종가만 오르내림
     tenkan, _ = ichimoku(candles(rows), 9, 26)
     assert tenkan[-1] == pytest.approx(tenkan[-5])
+
+
+def test_ichimoku_cloud_spans_are_shifted_back_to_the_present():
+    """스팬의 i 번째 값은 i-26 시점에 계산된 것이어야 '지금 자리의 구름'이 된다."""
+    rows = [(101 + i, 99 + i, 100 + i) for i in range(120)]
+    tenkan, kijun, span_a, span_b = ichimoku_cloud(candles(rows), 9, 26, 52, 26)
+
+    assert span_a[-1] == pytest.approx((tenkan[-27] + kijun[-27]) / 2)
+    # 상승장에서 구름은 가격 아래에 있다 (26봉 전의 낮은 값이므로)
+    assert max(span_a[-1], span_b[-1]) < rows[-1][2]
+
+
+def test_ichimoku_cloud_is_none_before_enough_data():
+    rows = [(101, 99, 100)] * 30
+    _, _, span_a, span_b = ichimoku_cloud(candles(rows), 9, 26, 52, 26)
+    assert span_a[-1] is None and span_b[-1] is None
