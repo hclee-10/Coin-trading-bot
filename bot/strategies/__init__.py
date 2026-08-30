@@ -14,14 +14,20 @@ from bot.strategies.base import (
 )
 from bot.strategies import (  # noqa: F401  등록 트리거
     breakout,
+    candlestick,
     channel,
     combo,
+    exhaustion,
+    expansion,
     hold,
     ichimoku,
     ichimoku_combo,
+    meta,
     momentum,
     oscillator,
     reversion,
+    smoothing,
+    structure,
     template,
     trend,
 )

@@ -494,6 +494,140 @@ def ichimoku_cloud(
     return tenkan, kijun, span_a, span_b
 
 
+def wma(values: list[float], period: int) -> Series:
+    """가중이동평균. 최근 값일수록 큰 가중치(1..period)를 준다."""
+    if period <= 0:
+        raise ValueError("period 는 1 이상이어야 합니다")
+    out: Series = [None] * len(values)
+    denominator = period * (period + 1) / 2
+    for i in range(period - 1, len(values)):
+        window = values[i - period + 1 : i + 1]
+        out[i] = sum(v * (j + 1) for j, v in enumerate(window)) / denominator
+    return out
+
+
+def hma(values: list[float], period: int = 16) -> Series:
+    """헐 이동평균. WMA 조합으로 지연을 상쇄해 빠르면서도 매끈하다.
+
+    HMA = WMA(2×WMA(n/2) − WMA(n), √n)
+    """
+    half = wma(values, max(1, period // 2))
+    full = wma(values, period)
+    diff = [
+        (2 * h - f) if (h is not None and f is not None) else None
+        for h, f in zip(half, full)
+    ]
+    defined = [v for v in diff if v is not None]
+    smooth_period = max(1, int(period ** 0.5))
+    tail = wma(defined, smooth_period)
+    return [None] * (len(diff) - len(tail)) + tail
+
+
+def trix(values: list[float], period: int = 15) -> Series:
+    """TRIX — 세 번 평활한 EMA 의 변화율(%). 잔파동이 세 겹으로 걸러진다."""
+    first = ema(values, period)
+    second_tail = ema([v for v in first if v is not None], period)
+    second: Series = [None] * (len(first) - len(second_tail)) + second_tail
+    third_tail = ema([v for v in second if v is not None], period)
+    third: Series = [None] * (len(second) - len(third_tail)) + third_tail
+    out: Series = [None] * len(values)
+    for i in range(1, len(values)):
+        if third[i] is not None and third[i - 1] is not None and third[i - 1] != 0:
+            out[i] = (third[i] / third[i - 1] - 1) * 100
+    return out
+
+
+def stoch_rsi(
+    values: list[float], rsi_period: int = 14, stoch_period: int = 14, smooth: int = 3
+) -> Series:
+    """스토캐스틱 RSI — RSI 를 다시 스토캐스틱으로 정규화한 값 (0~100).
+
+    RSI 가 극단에 닿지 않는 조용한 장에서도 상대적인 과열/침체를 잡아낸다.
+    그만큼 예민해서 원 RSI 보다 신호가 훨씬 잦다.
+    """
+    base = rsi(values, rsi_period)
+    raw: Series = [None] * len(values)
+    for i in range(len(values)):
+        if base[i] is None:
+            continue
+        window = [v for v in base[max(0, i - stoch_period + 1) : i + 1] if v is not None]
+        if len(window) < stoch_period:
+            continue
+        low, high = min(window), max(window)
+        raw[i] = 50.0 if high == low else (base[i] - low) / (high - low) * 100
+    defined = [v for v in raw if v is not None]
+    tail = sma(defined, smooth)
+    return [None] * (len(raw) - len(tail)) + tail
+
+
+def awesome_oscillator(candles: list[Candle], fast: int = 5, slow: int = 34) -> Series:
+    """어썸 오실레이터 — 중간가 (고+저)/2 의 SMA5 − SMA34."""
+    medians = [(c.high + c.low) / 2 for c in candles]
+    fast_line, slow_line = sma(medians, fast), sma(medians, slow)
+    return [
+        (f - s) if (f is not None and s is not None) else None
+        for f, s in zip(fast_line, slow_line)
+    ]
+
+
+def linear_regression(
+    values: list[float], period: int = 40
+) -> tuple[Series, Series, Series]:
+    """이동 선형회귀 — (기울기, 회귀선의 현재 값, 잔차 표준편차).
+
+    기울기는 봉당 변화량이다. 잔차 표준편차는 가격이 회귀선 주위로 얼마나
+    흩어져 있는지 — 회귀 채널의 폭이자 추세의 '깨끗함'이다.
+    """
+    slope_out: Series = [None] * len(values)
+    fit_out: Series = [None] * len(values)
+    sigma_out: Series = [None] * len(values)
+    if period < 2:
+        raise ValueError("period 는 2 이상이어야 합니다")
+    xs = list(range(period))
+    x_mean = (period - 1) / 2
+    x_var = sum((x - x_mean) ** 2 for x in xs)
+    for i in range(period - 1, len(values)):
+        window = values[i - period + 1 : i + 1]
+        y_mean = sum(window) / period
+        slope = sum((x - x_mean) * (y - y_mean) for x, y in zip(xs, window)) / x_var
+        intercept = y_mean - slope * x_mean
+        fitted = [intercept + slope * x for x in xs]
+        residual = sum((y - f) ** 2 for y, f in zip(window, fitted)) / period
+        slope_out[i] = slope
+        fit_out[i] = fitted[-1]
+        sigma_out[i] = residual ** 0.5
+    return slope_out, fit_out, sigma_out
+
+
+def pivot_highs(candles: list[Candle], strength: int = 2) -> list[int]:
+    """프랙탈 스윙 고점의 인덱스 목록.
+
+    좌우 strength 개 봉보다 고가가 높은 봉만 꼽는다. 마지막 strength 개 봉은
+    오른쪽이 아직 확정되지 않아 절대 포함되지 않는다 — 미래 정보를 쓰지 않기
+    위해서다.
+    """
+    out: list[int] = []
+    for i in range(strength, len(candles) - strength):
+        pivot = candles[i].high
+        if all(candles[i - k].high < pivot for k in range(1, strength + 1)) and all(
+            candles[i + k].high <= pivot for k in range(1, strength + 1)
+        ):
+            out.append(i)
+    return out
+
+
+def pivot_lows(candles: list[Candle], strength: int = 2) -> list[int]:
+    """프랙탈 스윙 저점의 인덱스 목록. pivot_highs 의 거울상."""
+    out: list[int] = []
+    for i in range(strength, len(candles) - strength):
+        pivot = candles[i].low
+        if all(candles[i - k].low > pivot for k in range(1, strength + 1)) and all(
+            candles[i + k].low >= pivot for k in range(1, strength + 1)
+        ):
+            out.append(i)
+    return out
+
+
 def highest(values: list[float], period: int) -> Series:
     out: Series = [None] * len(values)
     for i in range(period - 1, len(values)):
