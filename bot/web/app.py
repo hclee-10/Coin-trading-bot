@@ -63,6 +63,7 @@ def create_app(
     throttle: LoginThrottle | None = None,
     trust_proxy: bool = False,
     proxy_hops: int = 1,
+    startup_error: str | None = None,
 ) -> FastAPI:
     tokens = token_store or TokenStore()
     login_throttle = throttle or LoginThrottle()
@@ -153,9 +154,19 @@ def create_app(
         return {"ok": True}
 
     # ------------------------------------------------------------------
+    def status_payload() -> dict:
+        """상태에 기동 단계 오류를 얹는다.
+
+        설정이나 자격증명이 잘못된 채로 뜬 경우, 사용자가 배포 로그를 뒤지지
+        않고 화면에서 바로 원인을 볼 수 있어야 한다.
+        """
+        payload = asdict(supervisor.snapshot())
+        payload["startup_error"] = startup_error
+        return payload
+
     @app.get("/api/status")
     def get_status(_: str = Depends(require_auth)) -> dict:
-        return asdict(supervisor.snapshot())
+        return status_payload()
 
     @app.get("/api/config")
     def get_config(_: str = Depends(require_auth)) -> dict:
@@ -211,6 +222,12 @@ def create_app(
     @app.post("/api/bot/start")
     def start_bot(body: StartRequest, request: Request, _: str = Depends(require_auth)) -> dict:
         ip = client_ip(request)
+        if startup_error:
+            # 설정이 깨진 상태에서 봇이 돌기 시작하는 일은 없어야 한다.
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"{startup_error} — 환경변수를 고치고 다시 배포하세요.",
+            )
         if body.live and body.confirm != LIVE_CONFIRMATION:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
@@ -228,7 +245,7 @@ def create_app(
         log.warning(
             "대시보드에서 봇 시작 — ip=%s 모드=%s", ip, "실거래" if body.live else "DRY-RUN"
         )
-        return asdict(supervisor.snapshot())
+        return status_payload()
 
     @app.post("/api/bot/stop")
     def stop_bot(request: Request, _: str = Depends(require_auth)) -> dict:
@@ -240,7 +257,7 @@ def create_app(
                 status_code=status.HTTP_504_GATEWAY_TIMEOUT,
                 detail="봇이 제한 시간 안에 멈추지 않았습니다. 로그를 확인하세요.",
             )
-        return asdict(supervisor.snapshot())
+        return status_payload()
 
     @app.post("/api/positions/close-all")
     def close_all(
@@ -263,7 +280,7 @@ def create_app(
                 status_code=status.HTTP_502_BAD_GATEWAY,
                 detail=f"청산 실패: {exc} — 거래소에서 직접 확인하세요",
             ) from exc
-        return {"messages": messages, "status": asdict(supervisor.snapshot())}
+        return {"messages": messages, "status": status_payload()}
 
     # ------------------------------------------------------------------
     if static_dir is not None and static_dir.is_dir():

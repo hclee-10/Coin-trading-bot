@@ -122,6 +122,15 @@ export default function App() {
         <button className="ghost" onClick={logout}>로그아웃</button>
       </header>
 
+      {status.startup_error && (
+        <div className="banner error">
+          <strong>설정에 문제가 있어 봇을 시작할 수 없습니다.</strong>
+          {status.startup_error}
+          <br />
+          Railway 의 Variables 를 고친 뒤 다시 배포하세요.
+        </div>
+      )}
+
       {status.live && status.running && (
         <div className="banner live">
           <strong>실거래 모드로 동작 중입니다.</strong>

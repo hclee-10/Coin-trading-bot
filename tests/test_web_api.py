@@ -334,3 +334,58 @@ def test_missing_header_behind_a_proxy_falls_back_to_the_peer():
     assert attempt(client, None).status_code == 401
     assert attempt(client, None).status_code == 401
     assert attempt(client, None).status_code == 429
+
+
+# --- 기동 단계 오류 -------------------------------------------------------
+@pytest.fixture
+def broken_env():
+    """설정이나 자격증명이 잘못된 채로 뜬 서버."""
+    exchange = FakeExchange()
+    config = make_config()
+    supervisor = BotSupervisor(config, exchange_factory=lambda: exchange)
+    app = create_app(
+        config,
+        supervisor,
+        LogBuffer(capacity=10),
+        Account(username=USERNAME, password_hash=hash_password(PASSWORD)),
+        token_store=TokenStore(ttl_seconds=60),
+        startup_error="거래소 자격증명 오류: BITGET_API_PASSPHRASE 누락",
+    )
+    return TestClient(app), supervisor, exchange
+
+
+def test_server_still_serves_when_configuration_is_broken(broken_env):
+    """설정이 깨졌다고 사이트가 죽으면 원인을 볼 방법이 없어진다."""
+    client, _, _ = broken_env
+
+    assert client.get("/healthz").status_code == 200
+    body = client.get("/api/status", headers=login(client)).json()
+    assert "BITGET_API_PASSPHRASE" in body["startup_error"]
+
+
+def test_broken_configuration_blocks_starting_the_bot(broken_env):
+    client, supervisor, exchange = broken_env
+    headers = login(client)
+
+    response = client.post("/api/bot/start", json={"live": False}, headers=headers)
+
+    assert response.status_code == 409
+    assert "BITGET_API_PASSPHRASE" in response.json()["detail"]
+    assert not supervisor.running
+    assert exchange.sent_orders == []
+
+
+def test_live_start_is_blocked_too_even_with_the_confirmation(broken_env):
+    client, supervisor, _ = broken_env
+
+    response = client.post(
+        "/api/bot/start", json={"live": True, "confirm": "LIVE"}, headers=login(client)
+    )
+
+    assert response.status_code == 409
+    assert not supervisor.running
+
+
+def test_healthy_server_reports_no_startup_error(env):
+    client, *_ = env
+    assert client.get("/api/status", headers=login(client)).json()["startup_error"] is None

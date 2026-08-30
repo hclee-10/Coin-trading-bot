@@ -153,6 +153,10 @@ def main(argv: list[str] | None = None) -> int:
 
     load_dotenv(args.env_file)
 
+    # 대시보드는 설정이 잘못돼도 일단 뜬다 — 아래 _cmd_web 참조.
+    if args.command == "web":
+        return _cmd_web(args)
+
     try:
         config = Config.load(args.config)
     except ConfigError as exc:
@@ -167,15 +171,10 @@ def main(argv: list[str] | None = None) -> int:
     setup_logging(args.log_level or config.logging.level, config.logging.file)
 
     try:
-        # web 은 거래소를 봇 시작 시점에 만들지만, 키가 없는 채로 서버를 띄우면
-        # 시작 버튼을 눌러야만 문제를 알게 된다. 여기서 미리 확인한다.
         credentials = Credentials.from_env(config.exchange.id)
     except ConfigError as exc:
         print(f"인증 오류: {exc}", file=sys.stderr)
         return 2
-
-    if args.command == "web":
-        return _cmd_web(config, args)
 
     try:
         exchange = create_exchange(config.exchange, credentials)
@@ -318,8 +317,17 @@ def _cmd_hash_password() -> int:
     return 0
 
 
-def _cmd_web(config: Config, args) -> int:
-    """웹 대시보드 서버를 실행한다."""
+def _cmd_web(args) -> int:
+    """웹 대시보드 서버를 실행한다.
+
+    **설정이나 거래소 자격증명이 잘못돼도 서버는 뜬다.** 대시보드는 무엇이
+    잘못됐는지 보여주기 위한 물건인데, 여기서 프로세스를 죽여 버리면 정작
+    문제가 생겼을 때 아무것도 안 보이고 배포 로그를 뒤져야 한다. 문제는
+    화면에 띄우고, 그 상태에서는 봇 시작을 막는다.
+
+    다만 로그인 계정만은 예외다. 계정 없이 서버를 띄우면 인터넷에 인증 없는
+    제어판을 여는 셈이라, 이때는 뜨지 않는 쪽이 맞다.
+    """
     import uvicorn
 
     from bot.logging_utils import LogBuffer
@@ -333,9 +341,31 @@ def _cmd_web(config: Config, args) -> int:
         print(f"인증 설정 오류: {exc}", file=sys.stderr)
         return 2
 
+    startup_error: str | None = None
+    try:
+        config = Config.load(args.config)
+    except ConfigError as exc:
+        # 설정을 못 읽으면 화면을 띄우기 위한 자리표시자를 쓴다. 이 상태에서는
+        # 봇 시작이 막히므로 잘못된 설정으로 매매가 시작될 일은 없다.
+        config = Config()
+        startup_error = f"설정 오류: {exc}"
+
+    log_file = os.getenv("LOG_FILE", "").strip()
+    if log_file:
+        config.logging.file = log_file
+
     # 로그를 파일·콘솔과 함께 메모리 버퍼로도 흘려보낸다. 대시보드가 이걸 읽는다.
     log_buffer = LogBuffer(capacity=1000)
     setup_logging(args.log_level or config.logging.level, config.logging.file, log_buffer)
+
+    if startup_error is None:
+        try:
+            Credentials.from_env(config.exchange.id)
+        except ConfigError as exc:
+            startup_error = f"거래소 자격증명 오류: {exc}"
+
+    if startup_error:
+        log.error("%s — 대시보드는 뜨지만 봇은 시작할 수 없습니다", startup_error)
 
     if args.host not in LOCAL_HOSTS and not args.trust_proxy:
         # 프록시 뒤라면 0.0.0.0 이 정상이다. 그게 아니라면 HTTPS 없이 평문으로
@@ -368,6 +398,7 @@ def _cmd_web(config: Config, args) -> int:
         static_dir=STATIC_DIR,
         trust_proxy=args.trust_proxy,
         proxy_hops=args.proxy_hops,
+        startup_error=startup_error,
     )
 
     log.info("대시보드 서버 시작 — http://%s:%s", args.host, args.port)

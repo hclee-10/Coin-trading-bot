@@ -30,16 +30,23 @@ export default function Controls({ status, busy, onStart, onStop, onCloseAll }) 
   }
 
   const running = status.running
+  // 설정이 깨진 상태에서는 시작 버튼을 눌러 봐야 서버가 거절한다.
+  // 눌리지 않게 막고 이유를 보여 주는 편이 낫다.
+  const blocked = Boolean(status.startup_error)
 
   return (
     <section className="panel">
       <h2>제어</h2>
       <div className="panel-body">
         <div className="controls">
-          <button disabled={busy || running} onClick={() => onStart(false, '')}>
+          <button disabled={busy || running || blocked} onClick={() => onStart(false, '')}>
             DRY-RUN 시작
           </button>
-          <button className="primary" disabled={busy || running} onClick={() => open('live')}>
+          <button
+            className="primary"
+            disabled={busy || running || blocked}
+            onClick={() => open('live')}
+          >
             실거래 시작
           </button>
           <button disabled={busy || !running} onClick={onStop}>
@@ -78,7 +85,13 @@ export default function Controls({ status, busy, onStart, onStop, onCloseAll }) 
           </div>
         )}
 
-        {!running && (
+        {blocked && (
+          <p className="hint" style={{ marginTop: 12, marginBottom: 0 }}>
+            설정 오류가 해결될 때까지 봇을 시작할 수 없습니다.
+          </p>
+        )}
+
+        {!running && !blocked && (
           <p className="hint" style={{ marginTop: 12, marginBottom: 0 }}>
             DRY-RUN 은 사이징과 규격 보정까지 전부 수행하고 주문 전송만 건너뜁니다.
             새 전략은 여기서 먼저 관찰하세요.
