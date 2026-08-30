@@ -220,13 +220,18 @@ export default function App() {
         catalog={catalog}
         busy={busy}
         onReset={(confirm) => act(() => api.resetLeaderboard(confirm))}
+        storage={status.storage}
       />
 
       <StrategyInfo catalog={catalog} />
 
       <Positions positions={positions.positions} source={positions.source} />
 
-      <Performance performance={performance} currency={status.quote_currency} />
+      <Performance
+        performance={performance}
+        currency={status.quote_currency}
+        storage={status.storage}
+      />
 
       <Logs entries={logs} />
     </div>

@@ -1037,3 +1037,11 @@ def test_leaderboard_says_whether_records_survive_a_redeploy(env):
     client, *_ = env
     body = client.get("/api/leaderboard", headers=login(client)).json()
     assert body["persistent"] is False   # 이 테스트 환경에는 저장소가 없다
+
+
+def test_status_says_where_records_are_being_written(env):
+    """볼륨을 붙였는데 경고가 남으면 경로를 봐야 원인을 안다."""
+    client, *_ = env
+    body = client.get("/api/status", headers=login(client)).json()
+    assert body["storage"]["durable"] is False
+    assert "storage" in body and "path" in body["storage"]

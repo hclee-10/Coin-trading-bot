@@ -1,4 +1,5 @@
 import { Fragment, useState } from 'react'
+import StorageWarning from './StorageWarning.jsx'
 
 // 알고리즘 설명의 **강조** 를 굵게 그린다. 마크다운 라이브러리를 들이기에는
 // 쓰는 문법이 이것 하나뿐이다.
@@ -48,7 +49,7 @@ function riskClass(value) {
   return ''
 }
 
-export default function Leaderboard({ data, catalog, onReset, busy }) {
+export default function Leaderboard({ data, catalog, onReset, busy, storage }) {
   const [expanded, setExpanded] = useState(null)
   const [confirming, setConfirming] = useState(false)
   const [typed, setTyped] = useState('')
@@ -72,10 +73,11 @@ export default function Leaderboard({ data, catalog, onReset, busy }) {
       {/* 며칠씩 모아야 의미가 생기는 데이터다. 볼륨이 안 붙어 있으면 재배포
           한 번에 통째로 날아가므로, 표보다 먼저 눈에 띄어야 한다. */}
       {data.persistent === false && (
-        <div className="banner error" style={{ margin: '16px 16px 0' }}>
-          <strong>모의매매 기록이 메모리에만 남습니다 — 재배포하면 전부 사라집니다.</strong>
-          Railway 의 서비스에서 볼륨을 <code>/data</code> 에 마운트하면 계속 쌓입니다.
-        </div>
+        <StorageWarning
+          storage={storage}
+          what="모의매매 성적"
+          style={{ margin: '16px 16px 0' }}
+        />
       )}
 
       {rows.length === 0 ? (

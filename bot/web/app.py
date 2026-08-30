@@ -79,6 +79,7 @@ def create_app(
     trust_proxy: bool = False,
     proxy_hops: int = 1,
     startup_error: str | None = None,
+    storage_note: str = "",
 ) -> FastAPI:
     tokens = token_store or TokenStore()
     login_throttle = throttle or LoginThrottle()
@@ -231,6 +232,14 @@ def create_app(
         """
         payload = asdict(supervisor.snapshot())
         payload["startup_error"] = startup_error
+        # 기록이 어디에 쌓이는지. "볼륨을 붙였는데 왜 경고가 뜨냐" 를 화면에서
+        # 바로 확인할 수 있어야 한다 — 경로와 판단 근거를 함께 보낸다.
+        store = supervisor.store
+        payload["storage"] = {
+            "path": store.path if store else None,
+            "durable": bool(store and store.durable),
+            "note": storage_note,
+        }
         return payload
 
     @app.get("/api/status")

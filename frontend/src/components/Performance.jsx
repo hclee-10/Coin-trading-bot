@@ -1,3 +1,5 @@
+import StorageWarning from './StorageWarning.jsx'
+
 function money(value, digits = 2) {
   if (value === null || value === undefined) return '—'
   return value.toLocaleString(undefined, { maximumFractionDigits: digits })
@@ -13,7 +15,7 @@ function when(ms) {
   return new Date(ms).toLocaleString()
 }
 
-export default function Performance({ performance, currency }) {
+export default function Performance({ performance, currency, storage }) {
   if (!performance) return null
 
   const {
@@ -44,11 +46,11 @@ export default function Performance({ performance, currency }) {
         </h2>
         <div className="panel-body">
           {!persistent && (
-            <div className="banner warn" style={{ marginBottom: 14 }}>
-              <strong>기록이 메모리에만 남습니다.</strong>
-              재배포하면 성과 기록이 사라집니다. Railway 에서 볼륨을 <code>/data</code> 에
-              마운트하면 유지됩니다.
-            </div>
+            <StorageWarning
+              storage={storage}
+              what="성과 기록"
+              style={{ marginBottom: 14 }}
+            />
           )}
           <div className="cards" style={{ marginBottom: 0 }}>
             <div className="card">

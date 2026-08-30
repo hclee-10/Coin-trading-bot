@@ -2,7 +2,12 @@
 
 import pytest
 
-from bot.cli import build_parser, resolve_autostart, resolve_state_dir
+from bot.cli import (
+    build_parser,
+    is_mounted_volume,
+    resolve_autostart,
+    resolve_state_dir,
+)
 
 RAILWAY_VARS = ("RAILWAY_ENVIRONMENT", "RAILWAY_ENVIRONMENT_NAME",
                 "RAILWAY_PROJECT_ID", "RAILWAY_SERVICE_ID")
@@ -227,3 +232,44 @@ def test_a_fresh_volume_gets_the_db_at_its_root(monkeypatch, tmp_path):
     path, _, durable = resolve_state_dir(make_config(str(volume / "logs" / "bot.log")))
     assert path == str(volume)
     assert durable is True
+
+
+def test_a_bind_mount_on_the_same_filesystem_still_counts_as_a_volume(monkeypatch, tmp_path):
+    """볼륨을 제대로 붙였는데 아니라고 하면 멀쩡한 설정을 계속 고치게 된다.
+
+    os.path.ismount 는 같은 파일시스템 안의 바인드 마운트를 놓친다. 커널의
+    마운트 목록을 함께 보므로 그런 경우도 잡혀야 한다.
+    """
+    volume = tmp_path / "data"
+    volume.mkdir()
+    monkeypatch.setattr("bot.cli.os.path.ismount", lambda p: False)
+    assert is_mounted_volume(str(volume)) is False
+
+    monkeypatch.setattr("bot.cli._mount_points", lambda: {str(volume.resolve())})
+    assert is_mounted_volume(str(volume)) is True
+
+
+def test_a_path_that_does_not_exist_is_never_a_volume(monkeypatch, tmp_path):
+    monkeypatch.setattr("bot.cli._mount_points", lambda: {str(tmp_path / "nope")})
+    assert is_mounted_volume(str(tmp_path / "nope")) is False
+
+
+def test_check_env_reports_storage_without_failing_on_a_missing_volume(monkeypatch, capsys):
+    """볼륨은 환경변수 문제가 아니다 — 종료 코드가 아니라 별도 경고로 알린다."""
+    from bot.cli import main
+    from bot.web.auth import hash_password
+
+    monkeypatch.setenv("WEB_USERNAME", "trader")
+    monkeypatch.setenv("WEB_PASSWORD_HASH", hash_password("1234"))
+    monkeypatch.setenv("GATE_API_KEY", "k")
+    monkeypatch.setenv("GATE_API_SECRET", "s")
+    monkeypatch.setenv(
+        "CONFIG_YAML",
+        'exchange: {id: gate}\ntrading: {symbols: ["BTC/USDT:USDT"]}\n',
+    )
+    monkeypatch.setattr("bot.cli.VOLUME_CANDIDATES", ("/definitely-not-mounted-xyz",))
+
+    assert main(["check-env"]) == 0
+    out = capsys.readouterr().out
+    assert "기록 저장 위치" in out
+    assert "재배포마다 초기화됩니다" in out

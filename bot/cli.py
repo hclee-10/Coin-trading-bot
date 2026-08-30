@@ -584,7 +584,31 @@ def _cmd_check_env(args) -> int:
         ok = False
         print(f"  {prefix + '_API_*':20s} ✗ {exc.args[0].split('.')[0]}")
 
+    # 기록이 어디에 쌓이고 있는지. "볼륨을 붙였는데 왜 경고가 뜨냐" 를
+    # 추측이 아니라 실제 상태로 답하기 위한 항목이다.
+    state_dir, why, durable = resolve_state_dir(config)
     print()
+    print("기록 저장 위치")
+    print(f"  경로                 {Path(state_dir) / DB_FILENAME}")
+    print(f"  판단                 {why}")
+    if durable:
+        print("  재배포               기록이 유지됩니다 ✓")
+    else:
+        # 환경변수 문제가 아니므로 종료 코드는 건드리지 않는다. 로그인은 되지만
+        # 기록이 안 남는 상태이고, 그건 별개의 항목으로 보여 주는 편이 맞다.
+        print("  재배포               ✗ 사라집니다")
+        print("                       Railway 서비스에 Volume 을 추가하고")
+        print("                       Mount path 를 정확히 /data 로 지정한 뒤")
+        print("                       재배포하세요. 변수는 추가할 필요 없습니다.")
+        mounts = sorted(m for m in _mount_points() if m.startswith("/") and m.count("/") <= 2)
+        if mounts:
+            print(f"                       (지금 붙어 있는 마운트: {', '.join(mounts[:12])})")
+
+    print()
+    if not durable:
+        print("⚠ 기록이 재배포마다 초기화됩니다. 모의매매 성적을 며칠씩 모으려면")
+        print("  볼륨을 붙여야 합니다.")
+        print()
     if ok:
         print("모두 정상입니다. 대시보드에 로그인할 수 있어야 합니다.")
     else:
@@ -604,14 +628,30 @@ def _writable_dir(path: str) -> bool:
     return os.path.isdir(path) and os.access(path, os.W_OK)
 
 
+def _mount_points() -> set[str]:
+    """커널이 보고하는 마운트 지점들. 리눅스가 아니면 빈 집합."""
+    try:
+        with open("/proc/self/mountinfo", encoding="utf-8") as handle:
+            # 다섯 번째 필드가 마운트 지점이다.
+            return {line.split()[4] for line in handle if len(line.split()) > 4}
+    except (OSError, IndexError):
+        return set()
+
+
 def is_mounted_volume(path: str) -> bool:
     """이 경로가 진짜 마운트된 볼륨인지.
 
     디렉터리가 존재하는지만 보면 안 된다. 볼륨을 안 붙여도 코드가 `/data` 를
     만들어 버리기 때문에, 존재 여부로 판단하면 컨테이너 파일시스템에 쓰면서
     "잘 저장되고 있다" 고 착각하게 된다. 재배포하면 그대로 날아간다.
+
+    반대 방향의 오판은 더 나쁘다 — 볼륨을 제대로 붙였는데 아니라고 하면 사용자가
+    멀쩡한 설정을 계속 고치게 된다. `os.path.ismount` 는 같은 파일시스템 안에서
+    바인드 마운트한 경우를 놓치므로, 커널의 마운트 목록도 함께 본다.
     """
-    return _writable_dir(path) and os.path.ismount(path)
+    if not _writable_dir(path):
+        return False
+    return os.path.ismount(path) or os.path.realpath(path) in _mount_points()
 
 
 def resolve_state_dir(config: Config) -> tuple[str, str, bool]:
@@ -804,6 +844,7 @@ def _cmd_web(args) -> int:
         trust_proxy=args.trust_proxy,
         proxy_hops=args.proxy_hops,
         startup_error=startup_error,
+        storage_note=why,
     )
 
     # 봇을 자동으로 띄운다. 모의매매 순위표는 봇 루프가 돌아야 기록되므로,
