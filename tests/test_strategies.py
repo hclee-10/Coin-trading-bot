@@ -349,6 +349,57 @@ def test_ichimoku_sanyaku_enters_only_on_completion():
     assert entries == 1
 
 
+def test_liquidity_sweep_needs_the_recovery_not_just_the_break():
+    """저점을 깨는 것은 신호가 아니다 — 깨고 '복귀'해야 스프링이다."""
+    strategy = get_strategy("liquidity_sweep")
+    # 저가가 직전 저점(99.85)을 훑었지만 종가는 그 위로 복귀
+    spring = series([100.0] * 40 + [99.9, 99.9])
+    # 깨고 눌러앉음 — 하락 지속
+    breakdown = series([100.0] * 40 + [99.0, 99.0])
+
+    assert strategy.generate(context(spring)).action is SignalAction.ENTER_LONG
+    assert strategy.generate(context(breakdown)).action is not SignalAction.ENTER_LONG
+
+
+def test_inside_bar_waits_for_the_mother_bar_break():
+    strategy = get_strategy("inside_bar")
+    # 모봉(100→103) → 내부봉(103→101.5) → 모봉 고가 돌파(104)
+    setup = series([100.0] * 45 + [103.0, 101.5, 104.0, 104.0])
+    waiting = series([100.0] * 45 + [103.0, 101.5, 102.0, 102.0])
+
+    assert strategy.generate(context(setup)).action is SignalAction.ENTER_LONG
+    assert not strategy.generate(context(waiting)).is_entry
+
+
+def test_regime_switch_never_trend_trades_in_chop():
+    """횡보(ADX 낮음)에서 교차 모드 진입이 나오면 국면 판정이 무의미하다."""
+    strategy = get_strategy("regime_switch")
+    # 두 봉 올리고 두 봉 내리는 대칭 챱 — +DM/−DM 이 균형이라 ADX 가 낮다
+    chop = series([100.0 + (0.4 if (i // 2) % 2 else -0.4) for i in range(150)], wick=0.05)
+
+    for end in range(90, 150):
+        signal = strategy.generate(context(chop[:end]))
+        if signal.is_entry:
+            assert "추세장" not in signal.reason
+
+
+def test_confluence_enters_only_when_votes_pile_up():
+    """평평한 장에서는 표가 갈려 진입이 없어야 한다."""
+    strategy = get_strategy("confluence")
+    flat = series([100.0 + (0.1 if i % 3 else -0.1) for i in range(120)])
+    # 상승이 워밍업(80봉) 뒤에 시작해야 문턱 통과 순간이 관측된다
+    rising = series([100.0] * 90 + [100 + i * 0.6 for i in range(50)])
+
+    for end in range(90, 120):
+        assert not strategy.generate(context(flat[:end])).is_entry
+
+    entered = False
+    for end in range(85, len(rising)):
+        if strategy.generate(context(rising[:end])).is_entry:
+            entered = True
+    assert entered
+
+
 def test_exit_signals_never_carry_a_size():
     """청산은 방향만 있으면 된다 — 크기를 붙이면 실행 계층이 혼동한다."""
     strategy = get_strategy("supertrend")
