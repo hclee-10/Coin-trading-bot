@@ -13,7 +13,7 @@ from typing import Any
 
 import yaml
 
-SUPPORTED_EXCHANGES = ("bitget", "okx")
+SUPPORTED_EXCHANGES = ("bitget", "gate", "okx")
 
 # 컨테이너 배포(Railway 등)에서는 설정 파일을 올리기 번거로우므로 YAML 본문을
 # 환경변수로 통째로 넣을 수 있게 한다. 값이 있으면 파일보다 우선한다.
@@ -24,11 +24,27 @@ class ConfigError(Exception):
     """설정 파일이 없거나 값이 유효하지 않을 때."""
 
 
+def passphrase_required(exchange_id: str) -> bool:
+    """이 거래소가 API 패스프레이즈를 요구하는지 ccxt 에 직접 묻는다.
+
+    Bitget 과 OKX 는 키를 만들 때 패스프레이즈를 직접 정하지만 Gate 는 그런
+    개념이 없다. 목록을 여기에 하드코딩하면 ccxt 쪽이 바뀔 때 조용히 어긋나므로
+    라이브러리가 선언한 값을 그대로 쓴다.
+    """
+    import ccxt
+
+    try:
+        exchange_class = getattr(ccxt, exchange_id)
+    except AttributeError:
+        return False
+    return bool(exchange_class().requiredCredentials.get("password"))
+
+
 @dataclass
 class Credentials:
     api_key: str
     secret: str
-    password: str  # 두 거래소 모두 API 패스프레이즈를 요구한다
+    password: str = ""  # 패스프레이즈. Gate 처럼 쓰지 않는 거래소는 빈 값.
 
     @classmethod
     def from_env(cls, exchange_id: str) -> "Credentials":
@@ -36,15 +52,12 @@ class Credentials:
         key = os.getenv(f"{prefix}_API_KEY", "")
         secret = os.getenv(f"{prefix}_API_SECRET", "")
         password = os.getenv(f"{prefix}_API_PASSPHRASE", "")
-        missing = [
-            name
-            for name, value in (
-                (f"{prefix}_API_KEY", key),
-                (f"{prefix}_API_SECRET", secret),
-                (f"{prefix}_API_PASSPHRASE", password),
-            )
-            if not value
-        ]
+
+        required = [(f"{prefix}_API_KEY", key), (f"{prefix}_API_SECRET", secret)]
+        if passphrase_required(exchange_id):
+            required.append((f"{prefix}_API_PASSPHRASE", password))
+
+        missing = [name for name, value in required if not value]
         if missing:
             raise ConfigError(
                 f"{exchange_id} 자격증명 누락: {', '.join(missing)}. "

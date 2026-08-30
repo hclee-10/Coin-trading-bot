@@ -88,8 +88,11 @@ def test_config_yaml_env_var_wins_over_the_file(monkeypatch, tmp_path):
 
 
 def test_file_is_used_when_env_var_is_blank(monkeypatch):
+    from bot.config import SUPPORTED_EXCHANGES
+
     monkeypatch.setenv("CONFIG_YAML", "   ")
-    assert Config.load("config.example.yaml").exchange.id == "okx"
+    # 예제 파일이 어느 거래소를 쓰든 파일 경로가 선택됐는지만 확인한다
+    assert Config.load("config.example.yaml").exchange.id in SUPPORTED_EXCHANGES
 
 
 def test_broken_yaml_in_env_var_names_the_source(monkeypatch):

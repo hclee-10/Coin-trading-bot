@@ -2,7 +2,7 @@
 # API 키는 여기 두지 마세요 — .env 환경변수에서만 읽습니다.
 
 exchange:
-  id: okx                 # okx | bitget
+  id: gate                # gate | bitget | okx
   margin_mode: isolated   # isolated | cross
   leverage: 3
   hedge_mode: false       # 거래소 계정을 단방향(one-way) 모드로 두세요

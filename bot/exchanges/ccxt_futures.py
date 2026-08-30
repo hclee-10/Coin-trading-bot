@@ -1,13 +1,16 @@
-"""ccxt 기반 무기한 선물 어댑터 (Bitget / OKX 공용).
+"""ccxt 기반 무기한 선물 어댑터 (Bitget / Gate / OKX 공용).
 
 거래소별 차이는 이 파일 안에서만 다룬다:
 
-* **수량 단위** — OKX 스왑은 주문 수량이 *계약 수*이고 1계약 = `contractSize`
-  베이스 코인이다(예: BTC-USDT-SWAP 은 0.01 BTC). Bitget 스왑은 베이스 코인
-  단위(contractSize = 1)다. 상위 계층은 항상 베이스 코인 수량으로 생각하고,
-  계약 수 환산은 `base_to_contracts()` 가 맡는다.
-* **레버리지/마진 모드** — 파라미터 이름이 서로 다르고, 포지션이 열려 있으면
-  변경이 거부된다. 실패해도 봇을 죽이지 않고 경고만 남긴다.
+* **수량 단위** — OKX 와 Gate 스왑은 주문 수량이 *계약 수*이고 1계약 =
+  `contractSize` 베이스 코인이다(OKX BTC-USDT-SWAP 은 0.01 BTC, Gate BTC_USDT
+  는 0.0001 BTC). Bitget 스왑은 베이스 코인 단위(contractSize = 1)다. 상위
+  계층은 항상 베이스 코인 수량으로 생각하고, 계약 수 환산은
+  `base_to_contracts()` 가 맡는다.
+* **레버리지/마진 모드** — 셋이 전부 다르다. Bitget 격리는 롱/숏에 따로 걸어야
+  하고, Gate 는 마진 모드 전용 API 가 없어 클라이언트 옵션으로 지정하며, OKX 는
+  통합 파라미터를 받는다. 포지션이 열려 있으면 변경이 거부되므로 실패해도 봇을
+  죽이지 않고 경고만 남긴다.
 * **조건부 주문** — 손절/익절은 ccxt 통합 파라미터
   `stopLossPrice`/`takeProfitPrice` 로 보낸다. 취소·조회는 일반 주문과
   트리거 주문을 각각 훑는다.
@@ -208,23 +211,34 @@ class CcxtFuturesExchange(FuturesExchange):
         그대로 쓰는 것이 맞으므로 경고만 남기고 진행한다.
         """
         self._require_markets()
-        try:
-            self._ex.set_margin_mode(margin_mode, symbol, {"leverage": leverage})
-        except ccxt.BaseError as exc:
-            log.warning("%s %s 마진 모드(%s) 설정 실패 — 기존 설정 유지: %s",
-                        self.id, symbol, margin_mode, exc)
 
-        # Bitget 격리 마진은 방향(holdSide)별로 레버리지를 따로 잡는다.
-        if self.id == "bitget" and margin_mode == "isolated":
-            attempts = [{"holdSide": "long"}, {"holdSide": "short"}]
-        else:
-            attempts = [{"marginMode": margin_mode, "mgnMode": margin_mode}]
-        for params in attempts:
+        # Gate 에는 마진 모드 전용 엔드포인트가 없다 — set_leverage 가 옵션으로
+        # 읽어 간다. 지원하지 않는 거래소에서 굳이 호출해 경고를 남기지 않는다.
+        if self._ex.has.get("setMarginMode"):
+            try:
+                self._ex.set_margin_mode(margin_mode, symbol, {"leverage": leverage})
+            except ccxt.BaseError as exc:
+                log.warning("%s %s 마진 모드(%s) 설정 실패 — 기존 설정 유지: %s",
+                            self.id, symbol, margin_mode, exc)
+
+        for params in self._leverage_params(margin_mode):
             try:
                 self._ex.set_leverage(leverage, symbol, params)
             except ccxt.BaseError as exc:
                 log.warning("%s %s 레버리지(%s) 설정 실패 — 기존 설정 유지: %s",
                             self.id, symbol, leverage, exc)
+
+    def _leverage_params(self, margin_mode: str) -> list[dict[str, Any]]:
+        """거래소별 set_leverage 파라미터. 여러 개면 순서대로 모두 호출한다."""
+        if self.id == "bitget" and margin_mode == "isolated":
+            # Bitget 격리 마진은 방향(holdSide)별로 레버리지를 따로 잡는다.
+            return [{"holdSide": "long"}, {"holdSide": "short"}]
+        if self.id == "gate":
+            # Gate 는 params 로 넘긴 marginMode 를 걸러내지 않고 그대로 요청에
+            # 실어 보낸다. 클라이언트 옵션으로 지정하면 그 경로를 피할 수 있다.
+            self._ex.options["marginMode"] = margin_mode
+            return [{}]
+        return [{"marginMode": margin_mode}]
 
     # ------------------------------------------------------------------
     # 주문

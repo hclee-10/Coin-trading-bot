@@ -1,6 +1,6 @@
 # Coin Trading Bot
 
-Bitget / OKX **USDT 무기한 선물** 자동매매 봇. 거래소는 `ccxt` 로 추상화되어
+Gate.io / Bitget / OKX **USDT 무기한 선물** 자동매매 봇. 거래소는 `ccxt` 로 추상화되어
 있어 설정 한 줄로 갈아탈 수 있고, 매매 전략은 플러그인으로 끼워 넣는다.
 터미널에서도, 브라우저 대시보드에서도 돌릴 수 있다.
 
@@ -24,7 +24,7 @@ pip install -r requirements.txt
 
 ## 2. API 키 발급
 
-두 거래소 모두 **API 키 + 시크릿 + 패스프레이즈** 세 가지를 준다. 발급할 때:
+발급할 때 지켜야 할 것:
 
 - **권한은 "거래(Trade)"만 켠다. "출금(Withdraw)"은 절대 켜지 않는다.**
 - 가능하면 **IP 화이트리스트**를 건다 (봇을 돌릴 서버의 고정 IP).
@@ -32,10 +32,15 @@ pip install -r requirements.txt
 - 포지션 모드를 **단방향(one-way)** 으로 설정한다. 이 봇은 헤지 모드를
   지원하지 않으며, 설정에서도 막아 둔다.
 
-| 거래소 | 발급 위치 |
-|---|---|
-| OKX | 계정 → API → V5 API 키 생성 (passphrase 직접 지정) |
-| Bitget | 계정 → API 관리 → 새 키 생성 (passphrase 직접 지정) |
+| 거래소 | 발급 위치 | 필요한 값 |
+|---|---|---|
+| Gate.io | 계정 → API 키 관리 → APIv4 키 생성 | 키, 시크릿 (**패스프레이즈 없음**) |
+| Bitget | 계정 → API 관리 → 새 키 생성 | 키, 시크릿, 패스프레이즈 |
+| OKX | 계정 → API → V5 API 키 생성 | 키, 시크릿, 패스프레이즈 |
+
+Gate.io 는 API 패스프레이즈 개념이 없어 키와 시크릿 두 개만 넣으면 된다.
+Gate 키를 만들 때는 권한에서 **Perpetual Futures(무기한 선물)** 를 켜야 한다 —
+Spot 권한만으로는 선물 주문이 나가지 않는다.
 
 ```bash
 cp .env.example .env
@@ -54,7 +59,7 @@ cp config.example.yaml config.yaml
 
 | 항목 | 의미 |
 |---|---|
-| `exchange.id` | `okx` 또는 `bitget` |
+| `exchange.id` | `gate`, `bitget`, `okx` 중 하나 |
 | `exchange.leverage` | 레버리지. `risk.max_leverage` 를 넘으면 시작하지 않는다 |
 | `trading.symbols` | `"BTC/USDT:USDT"` 형식. `"BTC/USDT"` 는 현물이라 거부된다 |
 | `trading.poll_interval_sec` | 판단 주기(초). 최소 1초 (레이트리밋 보호) |
@@ -184,8 +189,9 @@ Variables 탭에서 설정한다. **Railway 는 `PORT` 를 자동으로 주입�
 |---|---|---|
 | `WEB_USERNAME` | ✅ | 대시보드 아이디 |
 | `WEB_PASSWORD_HASH` | ✅ | `hash-password` 가 출력한 `scrypt$...` 해시 |
-| `OKX_API_KEY` / `OKX_API_SECRET` / `OKX_API_PASSPHRASE` | ✅ | OKX 를 쓸 때 |
+| `GATE_API_KEY` / `GATE_API_SECRET` | ✅ | Gate.io 를 쓸 때 (패스프레이즈 없음) |
 | `BITGET_API_KEY` / `BITGET_API_SECRET` / `BITGET_API_PASSPHRASE` | ✅ | Bitget 을 쓸 때 |
+| `OKX_API_KEY` / `OKX_API_SECRET` / `OKX_API_PASSPHRASE` | ✅ | OKX 를 쓸 때 |
 | `CONFIG_YAML` | ✅ | `config.example.yaml` 내용을 그대로 붙여넣고 수정 |
 | `LOG_FILE` | — | 기본 `/data/logs/bot.log` (볼륨 경로) |
 | `TRUST_PROXY` | — | Railway 에서는 자동으로 켜진다 |
@@ -245,7 +251,7 @@ docker build -t coin-trading-bot .
 docker run --rm -p 8000:8000 \
   -e WEB_USERNAME=trader \
   -e WEB_PASSWORD_HASH='scrypt$...' \
-  -e OKX_API_KEY=... -e OKX_API_SECRET=... -e OKX_API_PASSPHRASE=... \
+  -e GATE_API_KEY=... -e GATE_API_SECRET=... \
   -e CONFIG_YAML="$(cat config.yaml)" \
   coin-trading-bot
 ```
@@ -408,7 +414,7 @@ bot/
   config.py            YAML 설정 + 환경변수 시크릿, 검증
   exchanges/
     base.py            FuturesExchange 인터페이스 (+ 계약 수량 환산 기본 구현)
-    ccxt_futures.py    Bitget/OKX 공용 ccxt 어댑터 — 거래소 차이는 전부 여기
+    ccxt_futures.py    Gate/Bitget/OKX 공용 ccxt 어댑터 — 거래소 차이는 전부 여기
     factory.py         설정 → 어댑터
   strategies/
     base.py            Strategy 인터페이스, StrategyContext, 레지스트리
@@ -436,13 +442,18 @@ tests/                 네트워크 없이 도는 단위 테스트 (가짜 거�
 
 거래소별로 다른 것은 `ccxt_futures.py` 안에서만 다룬다:
 
-- **수량 단위** — OKX 스왑은 주문 수량이 *계약 수*이고 1계약 = `contractSize`
-  베이스 코인이다(예: BTC-USDT-SWAP 은 0.01 BTC). Bitget 스왑은 베이스 코인
-  단위다. 상위 계층은 항상 베이스 코인으로 생각하고, `base_to_contracts()` 가
-  환산한다. **이 환산을 빠뜨리면 OKX에서 주문 수량이 100배로 나간다.**
-- **레버리지/마진 모드** — 파라미터 이름이 다르고, Bitget 격리 마진은 롱/숏에
-  각각 걸어야 한다. 포지션이 열려 있으면 변경이 거부되는데, 그 경우 기존 설정을
-  쓰는 게 맞으므로 경고만 남기고 진행한다.
+- **수량 단위** — OKX 와 Gate 스왑은 주문 수량이 *계약 수*이고 1계약 =
+  `contractSize` 베이스 코인이다(OKX BTC-USDT-SWAP 은 0.01 BTC, Gate BTC_USDT
+  는 0.0001 BTC). Bitget 스왑은 베이스 코인 단위다. 상위 계층은 항상 베이스
+  코인으로 생각하고, `base_to_contracts()` 가 환산한다. **이 환산을 빠뜨리면
+  Gate 에서 주문 수량이 1만 배로 나간다.**
+- **자격증명 구성** — Gate 는 패스프레이즈가 없고 Bitget·OKX 는 필수다. 어느
+  쪽인지는 ccxt 가 선언한 값을 그대로 읽어 판단한다.
+- **레버리지/마진 모드** — 셋이 전부 다르다. Bitget 격리는 롱/숏에 각각 걸어야
+  하고, Gate 는 마진 모드 전용 API 가 없어 클라이언트 옵션으로 지정하며(파라미터로
+  넘기면 요청에 그대로 실려 거부될 수 있다), OKX 는 통합 파라미터를 받는다.
+  포지션이 열려 있으면 변경이 거부되는데, 그 경우 기존 설정을 쓰는 게 맞으므로
+  경고만 남기고 진행한다.
 - **조건부 주문** — 손절/익절은 ccxt 통합 파라미터로 보내고, 취소는 일반 주문과
   트리거 주문을 각각 훑는다(거래소마다 대량 취소의 트리거 주문 포함 여부가 다름).
 
