@@ -291,7 +291,13 @@ def _cmd_hash_password() -> int:
 
     비밀번호 원문은 화면에 찍히지 않고 어디에도 저장되지 않는다.
     """
-    from bot.web.auth import PASSWORD_ENV, USERNAME_ENV, AuthError, hash_password
+    from bot.web.auth import (
+        PASSWORD_ENV,
+        RECOMMENDED_PASSWORD_LENGTH,
+        USERNAME_ENV,
+        AuthError,
+        hash_password,
+    )
 
     try:
         username = input("웹 대시보드 아이디: ").strip()
@@ -311,6 +317,18 @@ def _cmd_hash_password() -> int:
     except AuthError as exc:
         print(f"오류: {exc}", file=sys.stderr)
         return 1
+
+    if len(password) < RECOMMENDED_PASSWORD_LENGTH:
+        print(
+            f"\n⚠️  경고: 비밀번호가 {len(password)}자입니다 "
+            f"(권장 {RECOMMENDED_PASSWORD_LENGTH}자 이상).\n"
+            "   이 대시보드는 인터넷에 공개된 주소에서 계좌를 제어합니다. "
+            "로그인 시도 제한은\n"
+            "   IP 단위라 프록시를 돌리는 공격자에게는 잘 듣지 않습니다. "
+            "짧게 쓰시려면\n"
+            "   2단계 인증이나 Cloudflare Access 같은 관문을 함께 두시길 권합니다.",
+            file=sys.stderr,
+        )
     print("\n아래 두 줄을 .env(로컬) 또는 배포 환경의 환경변수에 넣으세요.")
     print("해시는 공백 없는 한 덩어리입니다 — 줄 끝까지 통째로 복사하세요.\n")
     print(f"{USERNAME_ENV}={username}")

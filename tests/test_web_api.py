@@ -510,3 +510,31 @@ def test_broken_hash_env_fails_loudly_instead_of_looking_like_a_wrong_password(m
 
     with pytest.raises(AuthError, match="WEB_PASSWORD_HASH"):
         load_account()
+
+
+# --- 비밀번호 길이 정책 ---------------------------------------------------
+def test_short_passwords_are_allowed():
+    """길이 판단은 사용자 몫이다 — 막지 않고 경고만 한다."""
+    from bot.web.auth import verify_password
+
+    token = hash_password("1234")
+
+    assert verify_password("1234", token) is True
+    assert verify_password("1235", token) is False
+
+
+def test_passwords_below_the_floor_are_rejected():
+    from bot.web.auth import MIN_PASSWORD_LENGTH, AuthError, hash_password as make
+
+    with pytest.raises(AuthError, match=str(MIN_PASSWORD_LENGTH)):
+        make("a" * (MIN_PASSWORD_LENGTH - 1))
+
+
+def test_short_password_still_produces_a_valid_token():
+    """길이를 줄여도 토큰 형식과 체크섬은 그대로 지켜져야 한다."""
+    from bot.web.auth import is_valid_password_hash
+
+    token = hash_password("1234")
+
+    assert is_valid_password_hash(token) is True
+    assert is_valid_password_hash(token[:-1]) is False

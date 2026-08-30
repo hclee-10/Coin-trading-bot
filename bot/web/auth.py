@@ -47,6 +47,12 @@ _LEGACY_PREFIX = "scrypt$"
 # 앞부분만 잘라도 그럴듯하게 디코딩되기 때문에 길이 검사만으로는 부족하다.
 _CHECKSUM_BYTES = 4
 
+# 비밀번호 길이 하한. 짧은 비밀번호는 막지 않되, 권장 길이에 못 미치면 생성
+# 단계에서 경고한다 — 인터넷에 공개된 주소에서 계좌 제어권을 지키는 값이고,
+# 로그인 시도 제한은 IP 단위라 프록시를 돌리는 공격자에게는 잘 듣지 않는다.
+MIN_PASSWORD_LENGTH = 4
+RECOMMENDED_PASSWORD_LENGTH = 12
+
 USERNAME_ENV = "WEB_USERNAME"
 PASSWORD_ENV = "WEB_PASSWORD_HASH"
 
@@ -57,8 +63,8 @@ class AuthError(Exception):
 
 def hash_password(password: str) -> str:
     """저장용 해시 토큰을 만든다. 구분자 없는 단일 base64url 문자열."""
-    if len(password) < 12:
-        raise AuthError("비밀번호는 12자 이상이어야 합니다 (인터넷에 노출되는 서버입니다)")
+    if len(password) < MIN_PASSWORD_LENGTH:
+        raise AuthError(f"비밀번호는 {MIN_PASSWORD_LENGTH}자 이상이어야 합니다")
     salt = secrets.token_bytes(_SALT_BYTES)
     digest = hashlib.scrypt(
         password.encode("utf-8"), salt=salt, n=_SCRYPT_N, r=_SCRYPT_R,
