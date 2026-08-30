@@ -6,7 +6,9 @@
 import pytest
 
 from bot.indicators import (
-    atr, bollinger, donchian, ema, highest, lowest, macd, rsi, sma, stddev, supertrend,
+    adx, atr, bollinger, cci, donchian, ema, heikin_ashi, highest, ichimoku, keltner,
+    lowest, macd, mfi, obv, psar, roc, rolling_vwap, rsi, sma, stddev, stochastic,
+    supertrend, williams_r,
 )
 from bot.models import Candle
 
@@ -125,3 +127,105 @@ def test_highest_and_lowest():
 def test_zero_period_is_rejected():
     with pytest.raises(ValueError):
         sma([1.0, 2.0], 0)
+
+
+# --- 오실레이터 -----------------------------------------------------------
+def test_stochastic_reads_position_in_the_range():
+    """범위의 천장 근처면 %K 가 높아야 한다."""
+    rows = [(110, 90, 100)] * 20 + [(110, 90, 109)] * 3
+    k, d = stochastic(candles(rows), 14, 3, 3)
+    assert k[-1] > 80
+    assert 0 <= d[-1] <= 100
+
+
+def test_stochastic_is_neutral_when_the_range_is_zero():
+    k, _ = stochastic(candles([(100, 100, 100)] * 30), 14, 3, 3)
+    assert k[-1] == pytest.approx(50.0)
+
+
+def test_williams_r_mirrors_stochastic():
+    """%R 은 평활 없는 %K 를 -100 쪽으로 뒤집은 값이다."""
+    rows = [(110, 90, 100)] * 20 + [(110, 90, 91)]
+    values = williams_r(candles(rows), 14)
+    assert values[-1] < -80  # 바닥권
+
+
+def test_cci_is_zero_on_flat_prices():
+    assert cci(candles([(101, 99, 100)] * 30), 20)[-1] == pytest.approx(0.0)
+
+
+def test_cci_goes_positive_on_a_jump():
+    rows = [(101, 99, 100)] * 25 + [(111, 109, 110)]
+    assert cci(candles(rows), 20)[-1] > 100
+
+
+def test_mfi_is_100_when_everything_rises():
+    rows = [(100 + i + 1, 100 + i - 1, 100 + i) for i in range(30)]
+    assert mfi(candles(rows), 14)[-1] == pytest.approx(100.0)
+
+
+def test_roc_measures_percent_change():
+    values = roc([100.0] * 10 + [110.0], 10)
+    assert values[-1] == pytest.approx(10.0)
+
+
+# --- 거래량 지표 ----------------------------------------------------------
+def test_obv_accumulates_signed_volume():
+    rows = [(101, 99, 100), (102, 100, 101), (103, 101, 102), (102, 100, 101)]
+    values = obv(candles(rows))
+    assert values == [0.0, 1.0, 2.0, 1.0]
+
+
+def test_rolling_vwap_equals_typical_mean_with_constant_volume():
+    rows = [(102, 98, 100)] * 30
+    assert rolling_vwap(candles(rows), 20)[-1] == pytest.approx(100.0)
+
+
+# --- 추세 지표 ------------------------------------------------------------
+def test_adx_rises_in_a_trend():
+    """추세장의 ADX 가 횡보장보다 높아야 필터로 쓸 수 있다."""
+    trending = candles([(101 + i, 99 + i, 100 + i) for i in range(60)])
+    choppy = candles([(101 + (i % 2), 99 - (i % 2), 100 + (i % 2)) for i in range(60)])
+    _, _, strong = adx(trending, 14)
+    _, _, weak = adx(choppy, 14)
+    assert strong[-1] > weak[-1]
+    assert strong[-1] > 25
+
+
+def test_adx_plus_di_dominates_in_an_uptrend():
+    plus, minus, _ = adx(candles([(101 + i, 99 + i, 100 + i) for i in range(60)]), 14)
+    assert plus[-1] > minus[-1]
+
+
+def test_keltner_straddles_the_middle():
+    upper, middle, lower = keltner(candles([(102, 98, 100)] * 40), 20, 10, 2.0)
+    assert lower[-1] < middle[-1] < upper[-1]
+
+
+def test_psar_stays_below_price_in_an_uptrend_and_flips():
+    rising = [(101 + i, 99 + i, 100 + i) for i in range(40)]
+    falling = [(141 - i * 3, 139 - i * 3, 140 - i * 3) for i in range(15)]
+    line, trend = psar(candles(rising + falling))
+    assert trend[39] == 1
+    assert line[39] < 99 + 39   # 상승 중엔 저가 아래
+    assert trend[-1] == -1
+
+
+def test_heikin_ashi_keeps_one_color_through_a_trend():
+    """잔파동 평활이 목적이다 — 꾸준한 추세에서는 색이 유지되어야 한다."""
+    rising = candles([(101 + i, 99 + i, 100 + i) for i in range(30)])
+    ha = heikin_ashi(rising)
+    assert all(c.close > c.open for c in ha[5:])
+
+
+def test_ichimoku_lines_are_range_midpoints():
+    tenkan, kijun = ichimoku(candles([(110, 90, 100)] * 40), 9, 26)
+    assert tenkan[-1] == pytest.approx(100.0)
+    assert kijun[-1] == pytest.approx(100.0)
+
+
+def test_ichimoku_stalls_inside_the_range():
+    """범위 안의 등락에는 움직이지 않는다 — 이동평균과의 결정적 차이."""
+    rows = [(110, 90, 95 + (i % 10)) for i in range(40)]  # 종가만 오르내림
+    tenkan, _ = ichimoku(candles(rows), 9, 26)
+    assert tenkan[-1] == pytest.approx(tenkan[-5])

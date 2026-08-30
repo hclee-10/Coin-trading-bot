@@ -14,7 +14,11 @@ from bot.strategies.base import (
 )
 from bot.strategies import (  # noqa: F401  등록 트리거
     breakout,
+    channel,
+    combo,
     hold,
+    momentum,
+    oscillator,
     reversion,
     template,
     trend,
