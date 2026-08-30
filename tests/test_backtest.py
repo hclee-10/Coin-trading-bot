@@ -290,3 +290,51 @@ def test_a_long_backtest_finishes_quickly():
     run_backtest(candles, Recorder({}), make_config())
 
     assert time.monotonic() - started < 10.0
+
+
+# --- 펀딩비 --------------------------------------------------------------
+EIGHT_HOURS_MS = 8 * 3_600_000
+
+
+def test_a_short_trade_never_pays_funding():
+    """정산 시각을 넘기지 않은 매매는 실제로 펀딩비를 내지 않는다."""
+    candles = bars([100] * 5)
+    strategy = EnterThenExit({"entry_at": 1, "exit_at": 2})
+
+    result = run_backtest(candles, strategy, make_config(), taker_fee=0.0, maker_fee=0.0)
+
+    (trade,) = result.trades
+    assert trade.funding == 0.0
+    assert result.total_funding == 0.0
+
+
+def test_holding_across_a_settlement_time_costs_funding():
+    """무기한 선물에서 펀딩비를 0 으로 두면 오래 들고 가는 전략이 실제보다 좋아 보인다."""
+    # 봉 간격을 8시간으로 잡아 보유 중에 정산 시각을 지나게 한다
+    candles = bars([100] * 6, step=EIGHT_HOURS_MS)
+    strategy = EnterThenExit({"entry_at": 1, "exit_at": 4})
+
+    result = run_backtest(
+        candles, strategy, make_config(),
+        taker_fee=0.0, maker_fee=0.0, funding_rate=0.001,
+    )
+
+    (trade,) = result.trades
+    assert trade.funding > 0
+    # 가격이 그대로여도 펀딩비만큼 손해다
+    assert trade.pnl == pytest.approx(-trade.funding)
+    assert result.total_funding == pytest.approx(trade.funding)
+    assert result.end_equity < result.start_equity
+
+
+def test_funding_can_be_turned_off():
+    candles = bars([100] * 6, step=EIGHT_HOURS_MS)
+    strategy = EnterThenExit({"entry_at": 1, "exit_at": 4})
+
+    result = run_backtest(
+        candles, strategy, make_config(),
+        taker_fee=0.0, maker_fee=0.0, funding_rate=0.0,
+    )
+
+    assert result.total_funding == 0.0
+    assert result.trades[0].pnl == pytest.approx(0.0)

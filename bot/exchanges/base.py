@@ -8,7 +8,17 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 
-from bot.models import Balance, Candle, Fill, Market, Order, Position, Side, Ticker
+from bot.models import (
+    Balance,
+    Candle,
+    Fill,
+    FundingRate,
+    Market,
+    Order,
+    Position,
+    Side,
+    Ticker,
+)
 
 
 class ExchangeError(Exception):
@@ -44,6 +54,15 @@ class FuturesExchange(ABC):
         ...
 
     # --- 계좌 ---
+    def fetch_funding_rate(self, symbol: str) -> FundingRate | None:
+        """현재 펀딩비율. 받지 못하면 None.
+
+        추상 메서드로 두지 않는다 — 펀딩비는 있으면 더 정확해지는 정보이지, 이게
+        없다고 매매를 못 할 이유는 없다. 구현하지 않은 거래소는 None 을 돌려주고
+        호출하는 쪽이 보수적인 기본값으로 대체한다.
+        """
+        return None
+
     @abstractmethod
     def fetch_balance(self, currency: str) -> Balance:
         """선물 계좌의 해당 통화 잔고."""

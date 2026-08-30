@@ -330,6 +330,7 @@ def create_app(
                     "max_drawdown_pct": s.max_drawdown_pct,
                     "liquidation_risk_pct": s.liquidation_risk_pct,
                     "total_fee": s.total_fee,
+                    "total_funding": s.total_funding,
                     "best_pnl": s.best_pnl,
                     "worst_pnl": s.worst_pnl,
                     "error": s.error,

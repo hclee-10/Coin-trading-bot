@@ -29,6 +29,12 @@ log = logging.getLogger(__name__)
 DEFAULT_TAKER_FEE = 0.0005   # 0.05%
 DEFAULT_MAKER_FEE = 0.0002   # 0.02%
 
+# 백테스트는 과거 펀딩비율을 내려받지 않는다. 방향과 무관하게 이 값을 비용으로
+# 가정한다 — 무기한 선물에서 펀딩비를 0 으로 두면 오래 들고 가는 전략이 실제보다
+# 무조건 좋아 보인다. 0 으로 넘기면 아예 계산하지 않는다.
+DEFAULT_FUNDING_RATE = 0.0001        # 0.01% / 8시간 (하루 0.03%)
+FUNDING_INTERVAL_MS = 8 * 3_600_000
+
 
 @dataclass
 class BacktestTrade:
@@ -39,10 +45,11 @@ class BacktestTrade:
     exit_price: float
     amount: float        # 베이스 코인 수량
     notional: float
-    pnl: float           # 수수료를 뺀 순손익
+    pnl: float           # 수수료와 펀딩비를 뺀 순손익
     fee: float
     exit_reason: str     # signal | stop | end
     conviction: float
+    funding: float = 0.0  # 보유 기간에 가정한 펀딩비
 
     @property
     def is_win(self) -> bool:
@@ -67,6 +74,7 @@ class BacktestResult:
     equity_curve: list[tuple[int, float]] = field(default_factory=list)
     max_drawdown_pct: float = 0.0
     total_fee: float = 0.0
+    total_funding: float = 0.0  # 가정한 펀딩비 합계 (아래 funding_rate 참고)
     missed_entries: int = 0     # 지정가가 체결되지 않아 넘긴 신호
 
     @property
@@ -113,6 +121,8 @@ class _OpenTrade:
     stop_loss: float
     entry_fee: float
     conviction: float
+    funding_paid: float = 0.0
+    next_funding_ms: int = 0
 
 
 def run_backtest(
@@ -127,6 +137,7 @@ def run_backtest(
     maker_fee: float = DEFAULT_MAKER_FEE,
     order_type: str = "market",
     limit_offset_pct: float = 0.02,
+    funding_rate: float = DEFAULT_FUNDING_RATE,
 ) -> BacktestResult:
     """전략을 과거 캔들에 돌린다.
 
@@ -167,6 +178,13 @@ def run_backtest(
     for i in range(warmup, len(candles) - 1):
         decision_bar = candles[i]
         fill_bar = candles[i + 1]
+
+        # --- 0) 펀딩비. 8시간 경계를 지날 때마다 한 번씩 문다. 과거 실제
+        #        비율은 받아 오지 않으므로 방향과 무관하게 비용으로 가정한다.
+        if open_trade is not None and funding_rate:
+            equity = _settle_funding(
+                open_trade, fill_bar, equity, funding_rate, result
+            )
 
         # --- 1) 먼저 손절을 확인한다. 봉 안의 순서를 모르므로 불리하게 가정한다.
         if open_trade is not None:
@@ -310,6 +328,30 @@ def _fill_price(
     return (price, maker_fee) if bar.low <= price else (None, maker_fee)
 
 
+def _settle_funding(
+    trade: _OpenTrade,
+    bar: Candle,
+    equity: float,
+    rate: float,
+    result: BacktestResult,
+) -> float:
+    """8시간 경계를 지났으면 펀딩비를 문다. 새 자기자본을 돌려준다."""
+    if trade.next_funding_ms <= 0:
+        trade.next_funding_ms = (
+            (bar.timestamp // FUNDING_INTERVAL_MS) + 1
+        ) * FUNDING_INTERVAL_MS
+        return equity
+
+    charged = 0.0
+    while bar.timestamp >= trade.next_funding_ms:
+        charged += abs(bar.close * trade.amount) * rate
+        trade.next_funding_ms += FUNDING_INTERVAL_MS
+    if charged:
+        trade.funding_paid += charged
+        result.total_funding += charged
+    return equity - charged
+
+
 def _close(
     trade: _OpenTrade,
     exit_price: float,
@@ -322,8 +364,9 @@ def _close(
     direction = 1 if trade.side is PositionSide.LONG else -1
     gross = (exit_price - trade.entry_price) * trade.amount * direction
     exit_fee = abs(exit_price * trade.amount) * fee_rate
-    pnl = gross - exit_fee - trade.entry_fee
-    # 진입 수수료는 진입 시점에 이미 뺐으므로 여기서는 총손익과 청산 수수료만 반영한다.
+    pnl = gross - exit_fee - trade.entry_fee - trade.funding_paid
+    # 진입 수수료와 펀딩비는 발생 시점에 이미 뺐으므로, 여기서는 총손익과
+    # 청산 수수료만 자기자본에 반영한다.
     new_equity = equity + gross - exit_fee
     return new_equity, BacktestTrade(
         side=trade.side.value,
@@ -335,6 +378,7 @@ def _close(
         notional=trade.notional,
         pnl=pnl,
         fee=trade.entry_fee + exit_fee,
+        funding=trade.funding_paid,
         exit_reason=reason,
         conviction=trade.conviction,
     )

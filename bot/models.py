@@ -68,6 +68,20 @@ class Ticker:
 
 
 @dataclass(frozen=True)
+class FundingRate:
+    """무기한 선물의 펀딩비. 보통 8시간마다 정산된다.
+
+    `rate` 가 양수면 롱이 숏에게 낸다. 즉 롱에게는 비용, 숏에게는 수입이다.
+    `next_time_ms` 는 다음 정산 시각으로, 거래소가 알려 주지 않으면 None 이다.
+    """
+
+    symbol: str
+    rate: float
+    next_time_ms: int | None = None
+    interval_hours: float = 8.0
+
+
+@dataclass(frozen=True)
 class Balance:
     currency: str
     free: float
