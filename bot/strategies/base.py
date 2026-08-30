@@ -43,6 +43,11 @@ class Strategy(ABC):
     """모든 전략의 베이스 클래스."""
 
     name: str = "unnamed"
+    # 대시보드와 `python -m bot strategies` 에 그대로 표시된다.
+    summary: str = ""
+    description: str = ""
+    # trend | reversion | breakout | combo | range
+    category: str = "other"
 
     def __init__(self, params: dict[str, Any] | None = None) -> None:
         self.params = params or {}
@@ -89,3 +94,16 @@ def get_strategy(name: str, params: dict[str, Any] | None = None) -> Strategy:
 
 def available_strategies() -> list[str]:
     return sorted(_REGISTRY)
+
+
+def strategy_catalog() -> list[dict[str, str]]:
+    """등록된 전략의 이름·분류·설명 목록. 화면과 CLI 가 함께 쓴다."""
+    return [
+        {
+            "name": name,
+            "category": cls.category,
+            "summary": cls.summary,
+            "description": (cls.description or "").strip(),
+        }
+        for name, cls in sorted(_REGISTRY.items())
+    ]

@@ -14,6 +14,12 @@ def make_executor(exchange, *, dry_run=False, allow_reverse=False, **risk_kwargs
     return Executor(exchange, risk, dry_run=dry_run, allow_reverse=allow_reverse)
 
 
+def risk_mode(**overrides):
+    """위험비율 사이징을 쓰는 설정. 기본은 확신도 기반 고정 금액이다."""
+    overrides.setdefault("sizing_mode", "risk")
+    return overrides
+
+
 def long_position(contracts=1.0) -> Position:
     return Position(
         symbol=SYMBOL, side=PositionSide.LONG, contracts=contracts,
@@ -23,7 +29,8 @@ def long_position(contracts=1.0) -> Position:
 
 def test_entry_sends_market_order_plus_stop_and_take_profit():
     ex = FakeExchange(price=100.0, equity=10_000.0)
-    executor = make_executor(ex)
+    # 익절은 기본으로 꺼져 있다 — 이 테스트는 켰을 때의 동작을 본다
+    executor = make_executor(ex, default_take_profit_pct=2.0)
 
     result = executor.handle(
         symbol=SYMBOL,
@@ -46,7 +53,7 @@ def test_entry_sends_market_order_plus_stop_and_take_profit():
 def test_okx_style_contract_size_is_converted():
     """1계약=0.01 BTC 인 거래소에서는 주문 수량이 계약 수로 나가야 한다."""
     ex = FakeExchange(price=100.0, equity=10_000.0, contract_size=0.01)
-    executor = make_executor(ex, max_position_notional_pct=20.0)
+    executor = make_executor(ex, **risk_mode(max_position_notional_pct=20.0))
 
     executor.handle(
         symbol=SYMBOL,

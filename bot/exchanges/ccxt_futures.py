@@ -138,9 +138,11 @@ class CcxtFuturesExchange(FuturesExchange):
             price_precision=_maybe_float(precision.get("price")),
         )
 
-    def fetch_candles(self, symbol: str, timeframe: str, limit: int) -> list[Candle]:
+    def fetch_candles(
+        self, symbol: str, timeframe: str, limit: int, since: int | None = None
+    ) -> list[Candle]:
         self._require_markets()
-        rows = self._call(self._ex.fetch_ohlcv, symbol, timeframe, None, limit)
+        rows = self._call(self._ex.fetch_ohlcv, symbol, timeframe, since, limit)
         candles = [
             Candle(
                 timestamp=int(r[0]),
@@ -301,6 +303,37 @@ class CcxtFuturesExchange(FuturesExchange):
                               bool(raw.get("reduceOnly")))
                 )
         return orders
+
+    def download_history(
+        self, symbol: str, timeframe: str, since: int, *, max_bars: int = 20_000
+    ) -> list[Candle]:
+        """과거 캔들을 페이지 단위로 이어 받는다.
+
+        거래소는 한 번에 수백~천 개만 준다. 백테스트에는 그보다 훨씬 많은 봉이
+        필요하므로 마지막 봉의 시각부터 이어서 요청한다.
+        """
+        self._require_markets()
+        step = self._ex.parse_timeframe(timeframe) * 1000
+        collected: list[Candle] = []
+        cursor = since
+
+        while len(collected) < max_bars:
+            page = self.fetch_candles(symbol, timeframe, 1000, cursor)
+            # 첫 봉이 커서와 같으면 더 받을 게 없다는 뜻이다.
+            page = [c for c in page if c.timestamp >= cursor]
+            if not page:
+                break
+            collected.extend(page)
+            next_cursor = page[-1].timestamp + step
+            if next_cursor <= cursor:
+                break   # 진전이 없으면 무한 루프를 막는다
+            cursor = next_cursor
+            if len(page) < 2:
+                break
+
+        # 페이지가 겹칠 수 있으므로 시각 기준으로 중복을 제거한다.
+        unique: dict[int, Candle] = {c.timestamp: c for c in collected}
+        return [unique[t] for t in sorted(unique)][:max_bars]
 
     def fetch_my_trades(self, symbol: str, since: int | None = None) -> list[Fill]:
         self._require_markets()

@@ -26,6 +26,19 @@ class PositionSide(str, Enum):
     FLAT = "flat"
 
 
+class Conviction(float, Enum):
+    """전략의 확신도. 이 값이 그대로 주문 금액 등급이 된다.
+
+    전략은 "얼마를 걸지" 를 정하지 않는다. 대신 네 단계로 확신을 표현하고,
+    금액 매핑은 리스크 계층이 설정에 따라 정한다.
+    """
+
+    LOW = 0.25
+    MEDIUM = 0.50
+    HIGH = 0.75
+    VERY_HIGH = 1.00
+
+
 class SignalAction(str, Enum):
     """전략이 엔진에 전달하는 의사결정."""
 

@@ -46,7 +46,9 @@ class FakeExchange(FuturesExchange):
             price_precision=0.01,
         )
 
-    def fetch_candles(self, symbol: str, timeframe: str, limit: int) -> list[Candle]:
+    def fetch_candles(
+        self, symbol: str, timeframe: str, limit: int, since: int | None = None
+    ) -> list[Candle]:
         return [
             Candle(
                 timestamp=1_700_000_000_000 + i * 60_000,

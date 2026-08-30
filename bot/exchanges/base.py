@@ -30,8 +30,14 @@ class FuturesExchange(ABC):
         """심볼의 수량·가격 규격을 반환한다."""
 
     @abstractmethod
-    def fetch_candles(self, symbol: str, timeframe: str, limit: int) -> list[Candle]:
-        """과거 캔들을 오래된 것부터 정렬해 반환한다."""
+    def fetch_candles(
+        self, symbol: str, timeframe: str, limit: int, since: int | None = None
+    ) -> list[Candle]:
+        """과거 캔들을 오래된 것부터 정렬해 반환한다.
+
+        `since`(ms)를 주면 그 시각 이후부터 가져온다. 백테스트용 과거 데이터를
+        페이지 단위로 받을 때 쓴다.
+        """
 
     @abstractmethod
     def fetch_ticker(self, symbol: str) -> Ticker:

@@ -124,6 +124,12 @@ class StrategyConfig:
 
 @dataclass
 class RiskConfig:
+    # tiers  : 확신도에 따라 정해진 명목가로 진입한다 (아래 notional_tiers).
+    # risk   : 손절까지의 거리에서 수량을 역산한다 (risk_per_trade_pct 사용).
+    sizing_mode: str = "tiers"
+    # 확신도 낮음 → 높음 순서. 전략이 낸 확신도가 이 중 하나로 매핑된다.
+    notional_tiers: list[float] = field(default_factory=lambda: [50.0, 100.0, 150.0, 200.0])
+
     risk_per_trade_pct: float = 0.5      # 손절까지 갔을 때 잃을 자기자본 비율(%)
     max_position_notional_pct: float = 20.0  # 자기자본 대비 포지션 명목가 상한(%)
     max_leverage: float = 5.0
@@ -131,9 +137,22 @@ class RiskConfig:
     max_daily_loss_pct: float = 3.0      # 일일 손실이 이 값을 넘으면 킬스위치
     min_order_notional: float = 5.0      # 이보다 작은 주문은 보내지 않는다
     default_stop_loss_pct: float = 1.0   # 전략이 손절가를 안 주면 사용
-    default_take_profit_pct: float = 2.0  # 0 이면 익절 주문을 걸지 않는다
+    default_take_profit_pct: float = 0.0  # 0 이면 익절을 걸지 않는다 (수익률 제한 없음)
 
     def validate(self) -> None:
+        if self.sizing_mode not in ("tiers", "risk"):
+            raise ConfigError(
+                f"sizing_mode 는 'tiers' 또는 'risk' 여야 합니다: {self.sizing_mode}"
+            )
+        if self.sizing_mode == "tiers":
+            if not self.notional_tiers:
+                raise ConfigError("notional_tiers 가 비어 있습니다")
+            if any(v <= 0 for v in self.notional_tiers):
+                raise ConfigError("notional_tiers 값은 모두 0보다 커야 합니다")
+            if list(self.notional_tiers) != sorted(self.notional_tiers):
+                raise ConfigError(
+                    "notional_tiers 는 확신도 낮음 → 높음 순으로 오름차순이어야 합니다"
+                )
         if not 0 < self.risk_per_trade_pct <= 100:
             raise ConfigError("risk_per_trade_pct 는 0 초과 100 이하여야 합니다")
         if not 0 < self.max_position_notional_pct <= 1000:
@@ -143,7 +162,11 @@ class RiskConfig:
         if self.max_open_positions < 1:
             raise ConfigError("max_open_positions 는 1 이상이어야 합니다")
         if self.default_stop_loss_pct <= 0:
-            raise ConfigError("default_stop_loss_pct 는 0보다 커야 합니다")
+            raise ConfigError(
+                "default_stop_loss_pct 는 0보다 커야 합니다 — 손절 없는 진입은 허용하지 않습니다"
+            )
+        if self.default_take_profit_pct < 0:
+            raise ConfigError("default_take_profit_pct 는 0 이상이어야 합니다 (0 = 익절 없음)")
         if self.max_daily_loss_pct <= 0:
             raise ConfigError("max_daily_loss_pct 는 0보다 커야 합니다")
 

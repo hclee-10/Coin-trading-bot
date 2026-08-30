@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import logging
+import math
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
@@ -110,6 +111,10 @@ class RiskManager:
                 f"동시 보유 포지션 한도 초과 ({open_positions}/{self.cfg.max_open_positions})",
             )
 
+        strength = max(0.0, min(1.0, signal.strength))
+        if strength <= 0:
+            return SizingDecision(False, "신호 강도가 0입니다")
+
         stop_loss = self.resolve_stop_loss(signal, entry_price, side)
         stop_distance = abs(entry_price - stop_loss)
         if stop_distance <= 0:
@@ -121,13 +126,16 @@ class RiskManager:
                 False, f"손절가({stop_loss})가 {side.value} 포지션 방향과 맞지 않습니다"
             )
 
-        # 손절까지 갔을 때 잃을 금액을 먼저 고정하고, 거기서 수량을 역산한다.
-        strength = max(0.0, min(1.0, signal.strength))
-        if strength <= 0:
-            return SizingDecision(False, "신호 강도가 0입니다")
-        risk_amount = equity * (self.cfg.risk_per_trade_pct / 100.0) * strength
-        base_amount = risk_amount / stop_distance
-        notional = base_amount * entry_price
+        if self.cfg.sizing_mode == "tiers":
+            notional = self.notional_for(strength)
+            base_amount = notional / entry_price
+            basis = f"확신도 {strength:.2f} → 명목가 {notional:.0f}"
+        else:
+            # 손절까지 갔을 때 잃을 금액을 먼저 고정하고, 거기서 수량을 역산한다.
+            risk_amount = equity * (self.cfg.risk_per_trade_pct / 100.0) * strength
+            base_amount = risk_amount / stop_distance
+            notional = base_amount * entry_price
+            basis = f"위험금액 {risk_amount:.2f} / 손절폭 {stop_distance:.6f}"
 
         # 상한 두 개를 적용한다: 자기자본 대비 비중, 그리고 레버리지가 허용하는 한도.
         caps = [
@@ -149,15 +157,27 @@ class RiskManager:
 
         return SizingDecision(
             approved=True,
-            reason=(
-                f"위험금액 {risk_amount:.2f} / 손절폭 {stop_distance:.6f} "
-                f"→ 수량 {base_amount:.8f} (명목가 {notional:.2f})"
-            ),
+            reason=f"{basis} → 수량 {base_amount:.8f} (명목가 {notional:.2f})",
             base_amount=base_amount,
             notional=notional,
             stop_loss=stop_loss,
             take_profit=self.resolve_take_profit(signal, entry_price, side),
         )
+
+    def notional_for(self, strength: float) -> float:
+        """확신도를 주문 명목가로 바꾼다.
+
+        구간을 등분해서 매핑한다 — 등급이 4개면 0~0.25 가 첫 등급, 0.75~1.0 이
+        마지막 등급이다. 전략은 Conviction 의 네 값 중 하나를 쓰면 정확히
+        의도한 등급으로 떨어진다.
+        """
+        tiers = list(self.cfg.notional_tiers)
+        if not tiers:
+            return 0.0
+        strength = max(0.0, min(1.0, strength))
+        # 0 초과 값이 첫 등급에 들어가도록 올림 방식으로 나눈다.
+        index = min(len(tiers) - 1, max(0, math.ceil(strength * len(tiers)) - 1))
+        return tiers[index]
 
     # ------------------------------------------------------------------
     # 손절 / 익절 기본값

@@ -10,8 +10,15 @@ from bot.strategies.base import (
     available_strategies,
     get_strategy,
     register_strategy,
+    strategy_catalog,
 )
-from bot.strategies import hold, template  # noqa: F401  등록 트리거
+from bot.strategies import (  # noqa: F401  등록 트리거
+    breakout,
+    hold,
+    reversion,
+    template,
+    trend,
+)
 
 __all__ = [
     "Strategy",
@@ -19,4 +26,5 @@ __all__ = [
     "available_strategies",
     "get_strategy",
     "register_strategy",
+    "strategy_catalog",
 ]

@@ -25,7 +25,7 @@ from bot.exchanges import create_exchange
 from bot.exchanges.base import ExchangeError
 from bot.logging_utils import setup_logging
 from bot.models import Signal, SignalAction
-from bot.strategies import available_strategies
+
 
 log = logging.getLogger(__name__)
 
@@ -81,7 +81,10 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", required=True)
 
     sub.add_parser("check", help="API 연결, 잔고, 심볼 규격을 점검한다 (주문 없음)")
-    sub.add_parser("strategies", help="등록된 전략 이름을 출력한다")
+    sub.add_parser("strategies", help="등록된 전략과 설명을 출력한다")
+
+    detail = sub.add_parser("strategy", help="전략 하나의 자세한 설명을 출력한다")
+    detail.add_argument("name", help="전략 이름")
     sub.add_parser("positions", help="설정된 심볼의 현재 포지션을 출력한다")
 
     run_cmd = sub.add_parser("run", help="트레이딩 루프를 실행한다")
@@ -111,6 +114,19 @@ def build_parser() -> argparse.ArgumentParser:
         "check-env",
         help="지금 이 환경에 어떤 환경변수가 들어와 있는지 점검한다 (값은 출력하지 않음)",
     )
+
+    bt = sub.add_parser("backtest", help="과거 캔들로 전략을 시험한다")
+    bt.add_argument("--strategy", help="전략 이름. 생략하면 전체를 비교한다")
+    bt.add_argument("--days", type=int, default=90, help="과거 며칠 (기본 90)")
+    bt.add_argument("--timeframe", help="봉 주기. 생략하면 설정값을 쓴다")
+    bt.add_argument("--symbol", help="심볼. 생략하면 설정의 첫 심볼")
+    bt.add_argument("--equity", type=float, default=10_000.0, help="시작 자기자본")
+    bt.add_argument(
+        "--order-type", choices=["market", "limit"], default="market",
+        help="limit 이면 지정가를 흉내 낸다 — 수수료가 낮은 대신 체결되지 않는 신호가 생긴다",
+    )
+    bt.add_argument("--taker-fee", type=float, default=0.05, help="taker 수수료 %% (기본 0.05)")
+    bt.add_argument("--maker-fee", type=float, default=0.02, help="maker 수수료 %% (기본 0.02)")
 
     web_cmd = sub.add_parser("web", help="웹 대시보드 서버를 실행한다")
     # PORT 는 Railway 등 PaaS 가 주입한다. 있으면 컨테이너 안이라는 뜻이므로
@@ -153,10 +169,10 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
 
     if args.command == "strategies":
-        print("등록된 전략:")
-        for name in available_strategies():
-            print(f"  - {name}")
-        return 0
+        return _cmd_strategies()
+
+    if args.command == "strategy":
+        return _cmd_strategy_detail(args.name)
 
     if args.command == "hash-password":
         return _cmd_hash_password()
@@ -207,6 +223,8 @@ def main(argv: list[str] | None = None) -> int:
             return _cmd_close(config, exchange, args)
         if args.command == "run":
             return _cmd_run(config, exchange, args)
+        if args.command == "backtest":
+            return _cmd_backtest(config, exchange, args)
     except ExchangeError as exc:
         log.error("거래소 오류: %s", exc)
         return 3
@@ -300,6 +318,116 @@ def _cmd_run(config: Config, exchange, args) -> int:
     engine = TradingEngine(config, exchange, dry_run=not args.live)
     engine.run()
     return 0
+
+
+def _cmd_strategies() -> int:
+    """전략 목록과 설명을 출력한다."""
+    from bot.strategies import strategy_catalog
+
+    labels = {
+        "trend": "추세추종", "reversion": "평균회귀", "breakout": "돌파",
+        "combo": "조합", "range": "횡보 전용", "other": "기타",
+    }
+    for entry in strategy_catalog():
+        if not entry["summary"]:
+            continue   # hold/template 은 목록에서 뺀다
+        print(f"\n  {entry['name']}  [{labels.get(entry['category'], entry['category'])}]")
+        print(f"    {entry['summary']}")
+    print("\n자세한 설명은 `python -m bot strategy <이름>` 으로 볼 수 있습니다.\n")
+    return 0
+
+
+def _cmd_strategy_detail(name: str) -> int:
+    from bot.strategies import strategy_catalog
+
+    for entry in strategy_catalog():
+        if entry["name"] == name:
+            print(f"\n{entry['name']} — {entry['summary']}\n")
+            print(entry["description"] or "(설명 없음)")
+            print()
+            return 0
+    print(f"'{name}' 전략을 찾을 수 없습니다.", file=sys.stderr)
+    return 1
+
+
+def _cmd_backtest(config: Config, exchange, args) -> int:
+    """과거 캔들을 받아 전략을 돌리고 결과를 표로 출력한다."""
+    import time as time_module
+
+    from bot.backtest import run_backtest
+    from bot.strategies import get_strategy, strategy_catalog
+
+    symbol = args.symbol or config.trading.symbols[0]
+    if args.timeframe:
+        config.trading.timeframe = args.timeframe
+    timeframe = config.trading.timeframe
+
+    since = int((time_module.time() - args.days * 86_400) * 1000)
+    print(f"{symbol} {timeframe} 캔들을 받는 중 (최근 {args.days}일)...")
+    candles = exchange.download_history(symbol, timeframe, since)
+    if len(candles) < 100:
+        print(f"캔들이 {len(candles)}개뿐이라 백테스트할 수 없습니다.", file=sys.stderr)
+        return 1
+
+    market = exchange.market(symbol)
+    span_days = (candles[-1].timestamp - candles[0].timestamp) / 86_400_000
+    print(f"캔들 {len(candles)}개 ({span_days:.0f}일), 1계약 = {market.contract_size} {market.base}\n")
+
+    if args.strategy:
+        names = [args.strategy]
+    else:
+        names = [e["name"] for e in strategy_catalog() if e["summary"]]
+
+    results = []
+    for name in names:
+        try:
+            strategy = get_strategy(name, config.strategy.params if args.strategy else None)
+        except KeyError as exc:
+            print(f"{exc}", file=sys.stderr)
+            return 1
+        result = run_backtest(
+            candles, strategy, config,
+            symbol=symbol,
+            start_equity=args.equity,
+            contract_size=market.contract_size,
+            taker_fee=args.taker_fee / 100.0,
+            maker_fee=args.maker_fee / 100.0,
+            order_type=args.order_type,
+        )
+        results.append(result)
+
+    results.sort(key=lambda r: r.return_pct, reverse=True)
+    _print_backtest_table(results, args)
+    return 0
+
+
+def _print_backtest_table(results, args) -> None:
+    header = (
+        f"{'전략':<22}{'수익률':>10}{'최대낙폭':>10}{'거래':>7}"
+        f"{'승률':>8}{'손익비':>8}{'수수료':>10}"
+    )
+    print(header)
+    print("-" * len(header.encode("utf-8").decode("utf-8")) * 1)
+    for r in results:
+        win = f"{r.win_rate:.0f}%" if r.win_rate is not None else "—"
+        factor = (
+            "∞" if r.profit_factor == float("inf")
+            else f"{r.profit_factor:.2f}" if r.profit_factor is not None
+            else "—"
+        )
+        print(
+            f"{r.strategy:<22}{r.return_pct:>9.2f}%{r.max_drawdown_pct:>9.2f}%"
+            f"{r.trade_count:>7}{win:>8}{factor:>8}{r.total_fee:>10.2f}"
+        )
+
+    print()
+    if args.order_type == "limit":
+        missed = sum(r.missed_entries for r in results)
+        print(f"지정가 미체결로 넘긴 신호: {missed}건")
+    print(
+        "수익률은 수수료를 뺀 값입니다. 거래 횟수가 30건 미만이면 우연일 가능성이 크니\n"
+        "결과를 그대로 믿지 마세요. 최대낙폭은 미실현 손실을 포함합니다."
+    )
 
 
 def _cmd_hash_password() -> int:
