@@ -17,6 +17,7 @@ from bot.strategies import (  # noqa: F401  등록 트리거
     channel,
     combo,
     hold,
+    ichimoku,
     momentum,
     oscillator,
     reversion,

@@ -194,6 +194,14 @@ class PaperArena:
     def strategy_names(self) -> list[str]:
         return sorted(self._strategies)
 
+    @property
+    def extra_timeframes(self) -> set[str]:
+        """경쟁 중인 전략들이 필요로 하는 상위 시간대의 합집합."""
+        out: set[str] = set()
+        for strategy in self._strategies.values():
+            out.update(strategy.extra_timeframes)
+        return out
+
     # ------------------------------------------------------------------
     def step(
         self,
@@ -201,6 +209,8 @@ class PaperArena:
         candles: list[Candle],
         ticker: Ticker,
         funding: FundingRate | None = None,
+        *,
+        mtf_candles: dict[str, list[Candle]] | None = None,
     ) -> None:
         """한 주기. 모든 전략에 같은 시세를 먹인다.
 
@@ -210,7 +220,10 @@ class PaperArena:
         now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
         for name, strategy in self._strategies.items():
             try:
-                self._step_one(name, strategy, symbol, candles, ticker, now_ms, funding)
+                self._step_one(
+                    name, strategy, symbol, candles, ticker, now_ms, funding,
+                    mtf_candles=mtf_candles,
+                )
                 self._errors.pop(name, None)
             except Exception as exc:
                 self._errors[name] = str(exc)
@@ -225,6 +238,8 @@ class PaperArena:
         ticker: Ticker,
         now_ms: int,
         funding: FundingRate | None = None,
+        *,
+        mtf_candles: dict[str, list[Candle]] | None = None,
     ) -> None:
         account = self.store.paper_account(
             name, start_equity=self.start_equity, now_ms=now_ms
@@ -273,6 +288,7 @@ class PaperArena:
                 ticker=ticker,
                 position=model_position,
                 equity=equity,
+                mtf_candles=mtf_candles or {},
             )
         )
 

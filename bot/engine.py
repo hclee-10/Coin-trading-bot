@@ -101,6 +101,9 @@ class TradingEngine:
         self._contract_sizes: dict[str, float] = {}
         self.last_error: str | None = None
         self.started_at: datetime | None = None
+        # 상위 시간대 캔들 캐시 (symbol, timeframe) → (받은 시각, 캔들).
+        # 1시간봉은 1시간에 한 번 바뀌는데 매 주기 받아 오면 레이트리밋만 태운다.
+        self._mtf_cache: dict[tuple[str, str], tuple[float, list[Candle]]] = {}
 
     # ------------------------------------------------------------------
     def prepare(self) -> None:
@@ -251,6 +254,43 @@ class TradingEngine:
             except Exception:
                 log.exception("%s 체결 내역 동기화 실패 — 매매는 계속합니다", symbol)
 
+    # 다중 시간대 전략용 상위 캔들. 일목 구름(52+26봉)이 계산되고도 남는 양이다.
+    MTF_CANDLE_LIMIT = 160
+    MTF_REFRESH_SEC = 60.0
+
+    def _mtf_candles(self, symbol: str) -> dict[str, list[Candle]]:
+        """실거래·모의매매 전략들이 선언한 상위 시간대 캔들을 모아 온다.
+
+        60초 캐시를 둔다 — 상위 봉은 느리게 바뀌므로 매 주기 받을 이유가 없고,
+        조회가 실패하면 이전 값을 그대로 쓴다(오래된 구름이 없는 구름보다 낫다).
+        """
+        needed = set(self.strategy.extra_timeframes)
+        if self.arena is not None:
+            needed |= self.arena.extra_timeframes
+        needed.discard(self.config.trading.timeframe)
+        if not needed:
+            return {}
+
+        now = time.monotonic()
+        out: dict[str, list[Candle]] = {}
+        for timeframe in sorted(needed):
+            key = (symbol, timeframe)
+            cached = self._mtf_cache.get(key)
+            if cached is not None and now - cached[0] < self.MTF_REFRESH_SEC:
+                out[timeframe] = cached[1]
+                continue
+            try:
+                candles = self.exchange.fetch_candles(
+                    symbol, timeframe, self.MTF_CANDLE_LIMIT
+                )
+                self._mtf_cache[key] = (now, candles)
+                out[timeframe] = candles
+            except Exception:
+                log.exception("%s %s 캔들 조회 실패 — 이전 값으로 계속합니다", symbol, timeframe)
+                if cached is not None:
+                    out[timeframe] = cached[1]
+        return out
+
     def _process_symbol(
         self,
         symbol: str,
@@ -278,12 +318,15 @@ class TradingEngine:
             )
 
         ticker = self.exchange.fetch_ticker(symbol)
+        mtf = self._mtf_candles(symbol)
 
         # 모의매매는 실거래 전략과 무관하게 항상 돈다. 여기서 터져도 실제 매매는
         # 계속되어야 한다 — 비교용 기능이 본업을 막으면 안 된다.
         if self.arena is not None:
             try:
-                self.arena.step(symbol, candles, ticker, self._funding_rate(symbol))
+                self.arena.step(
+                    symbol, candles, ticker, self._funding_rate(symbol), mtf_candles=mtf
+                )
             except Exception:
                 log.exception("%s 모의매매 처리 실패 — 실거래는 계속합니다", symbol)
 
@@ -294,6 +337,7 @@ class TradingEngine:
             ticker=ticker,
             position=position,
             equity=equity,
+            mtf_candles=mtf,
         )
         sig = self.strategy.generate(ctx)
         if not isinstance(sig, Signal):

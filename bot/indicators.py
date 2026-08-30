@@ -458,6 +458,42 @@ def ichimoku(
     return midline(tenkan_period), midline(kijun_period)
 
 
+def ichimoku_cloud(
+    candles: list[Candle],
+    tenkan_period: int = 9,
+    kijun_period: int = 26,
+    senkou_b_period: int = 52,
+    shift: int = 26,
+) -> tuple[Series, Series, Series, Series]:
+    """일목균형표 전체 — (전환선, 기준선, 선행스팬A, 선행스팬B).
+
+    선행스팬은 원래 26봉 **앞에** 그려지는 선이다. 여기서는 반대로 정렬한다 —
+    돌려주는 스팬의 i 번째 값은 **i 봉 시점에 그 자리에 그려져 있던 구름**,
+    즉 26봉 전에 계산된 값이다. 전략은 `span_a[-1]`, `span_b[-1]` 만 보면
+    "지금 가격 위치의 구름"과 비교할 수 있다.
+
+    구름 상단은 `max(span_a, span_b)`, 하단은 `min(...)`, 색은 A>B 면 양운이다.
+    """
+    tenkan, kijun = ichimoku(candles, tenkan_period, kijun_period)
+
+    def midline(period: int) -> Series:
+        out: Series = [None] * len(candles)
+        for i in range(period - 1, len(candles)):
+            window = candles[i - period + 1 : i + 1]
+            out[i] = (max(c.high for c in window) + min(c.low for c in window)) / 2
+        return out
+
+    raw_a: Series = [
+        (t + k) / 2 if (t is not None and k is not None) else None
+        for t, k in zip(tenkan, kijun)
+    ]
+    raw_b = midline(senkou_b_period)
+    # i 시점의 구름 = i-shift 시점에 계산된 스팬.
+    span_a: Series = [None] * shift + raw_a[: len(candles) - shift]
+    span_b: Series = [None] * shift + raw_b[: len(candles) - shift]
+    return tenkan, kijun, span_a, span_b
+
+
 def highest(values: list[float], period: int) -> Series:
     out: Series = [None] * len(values)
     for i in range(period - 1, len(values)):
