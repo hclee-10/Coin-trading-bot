@@ -69,6 +69,8 @@ def _cloud_state(candles: list[Candle], tenkan_p: int, kijun_p: int,
         "bottom": bottom,
         "kijun": kijun[-1],
         "tenkan": tenkan[-1],
+        "kijun_prev": kijun[-2],
+        "tenkan_prev": tenkan[-2],
         "bullish_cloud": span_a[-1] > span_b[-1],
         # 이번 봉에서 구름을 뚫었는지 (진입 트리거)
         "broke_up": prev_close <= prev_top and close > top,
