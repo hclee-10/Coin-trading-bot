@@ -351,7 +351,12 @@ def _cmd_check_env(args) -> int:
     명령이다. 컨테이너 안에서 실행하면 서버와 같은 환경을 본다.
     **값은 절대 출력하지 않고 이름과 상태만 보여 준다.**
     """
-    from bot.web.auth import PASSWORD_ENV, USERNAME_ENV, is_valid_password_hash
+    from bot.web.auth import (
+        PASSWORD_ENV,
+        PLAIN_PASSWORD_ENV,
+        USERNAME_ENV,
+        is_valid_password_hash,
+    )
 
     print("환경변수 점검\n")
 
@@ -373,15 +378,21 @@ def _cmd_check_env(args) -> int:
         print(f"  {USERNAME_ENV:20s} ✗ 비어 있음")
 
     encoded = os.getenv(PASSWORD_ENV, "").strip()
-    if not encoded:
-        ok = False
-        print(f"  {PASSWORD_ENV:20s} ✗ 비어 있음 — 아직 넣지 않았습니다")
-    elif is_valid_password_hash(encoded):
-        print(f"  {PASSWORD_ENV:20s} 설정됨 ({len(encoded)}자, 형식 정상)")
+    plain = os.getenv(PLAIN_PASSWORD_ENV, "").strip()
+    if encoded:
+        if is_valid_password_hash(encoded):
+            print(f"  {PASSWORD_ENV:20s} 설정됨 ({len(encoded)}자, 형식 정상)")
+        else:
+            ok = False
+            print(f"  {PASSWORD_ENV:20s} ✗ 값이 깨졌습니다 ({len(encoded)}자)")
+            print("                       `hash-password` 출력을 통째로 다시 넣거나,")
+            print(f"                       이 변수를 지우고 {PLAIN_PASSWORD_ENV} 를 쓰세요.")
+    elif plain:
+        print(f"  {PLAIN_PASSWORD_ENV:20s} 설정됨 ({len(plain)}자) — 평문 방식")
     else:
         ok = False
-        print(f"  {PASSWORD_ENV:20s} ✗ 값이 깨졌습니다 ({len(encoded)}자)")
-        print("                       `hash-password` 출력을 통째로 다시 넣으세요.")
+        print(f"  {PLAIN_PASSWORD_ENV:20s} ✗ 비밀번호가 설정되지 않았습니다")
+        print("                       이 변수에 비밀번호를 그대로 넣으면 됩니다.")
 
     prefix = config.exchange.id.upper()
     try:
@@ -407,10 +418,17 @@ def _log_env_diagnostics(config: Config) -> None:
     무엇이 문제인지 로그만 보고 알 수 있어야 한다. **값은 절대 찍지 않는다.**
     """
     from bot.config import passphrase_required
-    from bot.web.auth import PASSWORD_ENV, USERNAME_ENV, is_valid_password_hash
+    from bot.web.auth import (
+        PASSWORD_ENV,
+        PLAIN_PASSWORD_ENV,
+        USERNAME_ENV,
+        is_valid_password_hash,
+    )
 
     prefix = config.exchange.id.upper()
-    names = [USERNAME_ENV, PASSWORD_ENV, "CONFIG_YAML",
+    # 비밀번호는 두 방식 중 실제로 쓰이는 쪽만 보고한다.
+    password_env = PASSWORD_ENV if os.getenv(PASSWORD_ENV, "").strip() else PLAIN_PASSWORD_ENV
+    names = [USERNAME_ENV, password_env, "CONFIG_YAML",
              f"{prefix}_API_KEY", f"{prefix}_API_SECRET"]
     if passphrase_required(config.exchange.id):
         names.append(f"{prefix}_API_PASSPHRASE")
@@ -420,7 +438,7 @@ def _log_env_diagnostics(config: Config) -> None:
         value = os.getenv(name, "")
         if not value.strip():
             state = "없음"
-        elif name == PASSWORD_ENV and not is_valid_password_hash(value):
+        elif name == PASSWORD_ENV and not is_valid_password_hash(value):  # 해시 방식일 때만
             # $ 가 많은 값이라 셸을 거치면 변수 확장으로 중간이 날아가기 쉽다.
             state = "값이 깨짐(hash-password 출력을 통째로 넣으세요)"
         else:

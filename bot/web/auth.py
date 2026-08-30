@@ -55,6 +55,7 @@ RECOMMENDED_PASSWORD_LENGTH = 12
 
 USERNAME_ENV = "WEB_USERNAME"
 PASSWORD_ENV = "WEB_PASSWORD_HASH"
+PLAIN_PASSWORD_ENV = "WEB_PASSWORD"
 
 
 class AuthError(Exception):
@@ -179,27 +180,47 @@ class Account:
 
 
 def load_account() -> Account:
-    """환경변수에서 계정을 읽는다. 하나라도 없으면 서버를 띄우지 않는다."""
+    """환경변수에서 계정을 읽는다.
+
+    비밀번호는 두 가지 방식 중 하나로 준다:
+
+    * `WEB_PASSWORD` — 비밀번호를 그대로 넣는다. 서버가 기동할 때 해시로 바꾼다.
+      설정이 간단한 대신, 배포 환경의 변수를 볼 수 있는 사람은 비밀번호를 그대로
+      보게 된다. (다만 그 사람은 바로 옆의 거래소 API 키도 이미 볼 수 있다.)
+    * `WEB_PASSWORD_HASH` — `hash-password` 로 미리 만든 해시를 넣는다.
+      비밀번호가 어디에도 평문으로 남지 않는다. 다른 곳에서도 쓰는 비밀번호라면
+      이쪽을 쓴다.
+
+    둘 다 있으면 해시가 우선한다.
+    """
     username = os.getenv(USERNAME_ENV, "").strip()
     encoded = os.getenv(PASSWORD_ENV, "").strip()
+    # 붙여넣기에 섞여 들어온 줄바꿈·공백 때문에 로그인이 막히는 일이 잦다.
+    plain = os.getenv(PLAIN_PASSWORD_ENV, "").strip()
 
-    missing = [
-        name
-        for name, value in ((USERNAME_ENV, username), (PASSWORD_ENV, encoded))
-        if not value
-    ]
-    if missing:
+    if not username:
         raise AuthError(
-            f"{', '.join(missing)} 가 설정되지 않았습니다. "
-            "`python -m bot hash-password` 로 아이디와 해시를 만들어 환경변수에 넣으세요."
+            f"{USERNAME_ENV} 가 설정되지 않았습니다. 대시보드에 쓸 아이디를 넣으세요."
         )
-    if not is_valid_password_hash(encoded):
-        raise AuthError(
-            f"{PASSWORD_ENV} 값이 깨졌거나 형식이 올바르지 않습니다. "
-            "`python -m bot hash-password` 가 출력한 한 줄을 처음부터 끝까지 "
-            "그대로 붙여넣으세요 (공백 없는 한 덩어리입니다)."
-        )
-    return Account(username=username, password_hash=encoded)
+
+    if encoded:
+        if not is_valid_password_hash(encoded):
+            raise AuthError(
+                f"{PASSWORD_ENV} 값이 깨졌거나 형식이 올바르지 않습니다. "
+                "`python -m bot hash-password` 가 출력한 한 줄을 처음부터 끝까지 "
+                f"그대로 붙여넣으세요. 더 간단하게 하려면 {PASSWORD_ENV} 를 지우고 "
+                f"{PLAIN_PASSWORD_ENV} 에 비밀번호를 그대로 넣어도 됩니다."
+            )
+        return Account(username=username, password_hash=encoded)
+
+    if plain:
+        # 기동 시 한 번 해시한다. 메모리에도 평문을 들고 있지 않게 된다.
+        return Account(username=username, password_hash=hash_password(plain))
+
+    raise AuthError(
+        f"비밀번호가 설정되지 않았습니다. {PLAIN_PASSWORD_ENV} 에 비밀번호를 그대로 "
+        f"넣거나, `python -m bot hash-password` 로 만든 값을 {PASSWORD_ENV} 에 넣으세요."
+    )
 
 
 @dataclass(frozen=True)

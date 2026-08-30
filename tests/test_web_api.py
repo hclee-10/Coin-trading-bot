@@ -538,3 +538,55 @@ def test_short_password_still_produces_a_valid_token():
 
     assert is_valid_password_hash(token) is True
     assert is_valid_password_hash(token[:-1]) is False
+
+
+# --- 평문 비밀번호 방식 ---------------------------------------------------
+def test_plain_password_env_is_hashed_at_startup(monkeypatch):
+    """해시를 손으로 옮기지 않고 비밀번호를 그대로 넣어도 되어야 한다."""
+    from bot.web.auth import load_account
+
+    monkeypatch.delenv("WEB_PASSWORD_HASH", raising=False)
+    monkeypatch.setenv("WEB_USERNAME", "uta24")
+    monkeypatch.setenv("WEB_PASSWORD", "1234")
+
+    account = load_account()
+
+    assert account.verify("uta24", "1234") is True
+    assert account.verify("uta24", "9999") is False
+    # 평문이 그대로 저장되지 않는다
+    assert "1234" not in account.password_hash
+
+
+def test_hash_env_wins_when_both_are_set(monkeypatch):
+    from bot.web.auth import load_account
+
+    monkeypatch.setenv("WEB_USERNAME", "uta24")
+    monkeypatch.setenv("WEB_PASSWORD", "1234")
+    monkeypatch.setenv("WEB_PASSWORD_HASH", hash_password("the-real-one"))
+
+    account = load_account()
+
+    assert account.verify("uta24", "the-real-one") is True
+    assert account.verify("uta24", "1234") is False
+
+
+def test_missing_password_names_the_simple_option(monkeypatch):
+    from bot.web.auth import AuthError, load_account
+
+    monkeypatch.delenv("WEB_PASSWORD_HASH", raising=False)
+    monkeypatch.delenv("WEB_PASSWORD", raising=False)
+    monkeypatch.setenv("WEB_USERNAME", "uta24")
+
+    with pytest.raises(AuthError, match="WEB_PASSWORD"):
+        load_account()
+
+
+def test_whitespace_around_the_plain_password_is_trimmed(monkeypatch):
+    """붙여넣기에 줄바꿈이 섞였다고 로그인이 막히면 안 된다."""
+    from bot.web.auth import load_account
+
+    monkeypatch.delenv("WEB_PASSWORD_HASH", raising=False)
+    monkeypatch.setenv("WEB_USERNAME", "uta24")
+    monkeypatch.setenv("WEB_PASSWORD", "  1234\n")
+
+    assert load_account().verify("uta24", "1234") is True

@@ -117,21 +117,37 @@ pip install -r requirements-web.txt
 # 프론트엔드 빌드 (Node 20+ 필요). 산출물은 bot/web/static/ 에 생성된다.
 cd frontend && npm install && npm run build && cd ..
 
-# 대시보드 계정 생성 → 출력된 두 줄을 .env 에 붙여넣기
-python -m bot hash-password
+대시보드 계정은 환경변수로 준다. 기본 계정은 존재하지 않는다.
+
+```bash
+WEB_USERNAME=내아이디
+WEB_PASSWORD=내비밀번호
 ```
 
-`WEB_USERNAME` 과 `WEB_PASSWORD_HASH` 가 없거나 값이 깨져 있으면 로그인이
-불가능하다. 기본 계정은 존재하지 않는다.
+**로그인할 때 입력하는 것은 이 비밀번호다.** 서버는 기동할 때 이 값을 해시로
+바꿔서 들고 있으므로, 메모리에 평문이 남지는 않는다.
+
+비밀번호를 환경변수에 평문으로 두기 싫다면 미리 해시를 만들어 넣어도 된다.
+다른 곳에서도 쓰는 비밀번호라면 이쪽이 낫다:
+
+```bash
+python -m bot hash-password     # 출력된 두 줄을 넣는다
+```
+
+이때 `WEB_PASSWORD_HASH` 는 공백도 특수문자도 없는 한 덩어리이므로 줄 끝까지
+통째로 복사한다. 한 글자라도 잘리거나 깨지면 체크섬에서 걸러져, 로그인 화면이
+"비밀번호가 틀렸다" 가 아니라 "값이 깨졌다" 고 알려 준다. 둘 다 설정하면
+해시가 우선한다.
+
+> 다만 이 이득은 생각보다 크지 않다. 같은 환경변수 목록에 거래소 API 키가
+> 평문으로 들어 있으므로, 변수를 읽을 수 있는 사람은 어차피 계좌를 건드릴 수
+> 있다. 해시가 지켜 주는 것은 주로 **비밀번호 재사용** — 이 비밀번호를 다른
+> 서비스에서도 쓴다면 그쪽이 함께 털리지 않게 해 준다.
 
 비밀번호는 4자 이상이면 만들어지지만, **12자 미만이면 경고가 뜬다.** 이 주소는
 인터넷에 공개돼 있고 로그인 시도 제한은 IP 단위라, 프록시를 돌리는 공격자에게는
 잘 듣지 않는다. 짧게 쓰려면 2단계 인증이나 Cloudflare Access 같은 관문을 함께
 두는 편이 좋다.
-
-해시는 **공백도 특수문자도 없는 한 덩어리**이므로 줄 끝까지 통째로 복사한다.
-값이 한 글자라도 잘리거나 깨지면 체크섬에서 걸러져, 로그인 화면과 기동 로그가
-"비밀번호가 틀렸다" 가 아니라 "값이 깨졌다" 고 알려 준다.
 
 ### 실행
 
@@ -212,7 +228,8 @@ Variables 탭에서 설정한다. **Railway 는 `PORT` 를 자동으로 주입�
 | 변수 | 필수 | 설명 |
 |---|---|---|
 | `WEB_USERNAME` | ✅ | 대시보드 아이디 |
-| `WEB_PASSWORD_HASH` | ✅ | `hash-password` 가 출력한 해시 (공백 없는 한 덩어리) |
+| `WEB_PASSWORD` | ✅ | 대시보드 비밀번호. 로그인 때 입력하는 값 그대로 |
+| `WEB_PASSWORD_HASH` | — | 평문 대신 해시를 쓰고 싶을 때 (`hash-password` 출력) |
 | `GATE_API_KEY` / `GATE_API_SECRET` | ✅ | Gate.io 를 쓸 때 (패스프레이즈 없음) |
 | `BITGET_API_KEY` / `BITGET_API_SECRET` / `BITGET_API_PASSPHRASE` | ✅ | Bitget 을 쓸 때 |
 | `OKX_API_KEY` / `OKX_API_SECRET` / `OKX_API_PASSPHRASE` | ✅ | OKX 를 쓸 때 |
