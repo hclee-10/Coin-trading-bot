@@ -101,6 +101,17 @@ class TradingConfig:
     allow_reverse: bool = False  # 반대 신호에서 청산 후 즉시 반대 진입 허용 여부
     close_positions_on_exit: bool = False
 
+    # 진입·청산 주문 방식. limit 이면 maker 수수료(0.02%)를, market 이면
+    # taker 수수료(0.05%)를 낸다. 왕복이면 0.04% 대 0.10% 로 두 배 넘게 차이난다.
+    #
+    # 대신 지정가는 체결이 보장되지 않는다. 가격이 지나가지 않으면 신호를 놓치고,
+    # **체결을 확인한 다음 주기에야 손절 주문이 걸린다** — 그 사이(최대 폴링
+    # 주기 1회)는 손절 없이 노출된다. 손절이 즉시 필요하면 market 을 쓴다.
+    order_type: str = "limit"
+    limit_offset_pct: float = 0.02   # 현재가에서 유리한 쪽으로 벌리는 폭(%)
+    limit_timeout_sec: float = 60.0  # 이 시간 안에 안 채워지면 취소한다
+    limit_fallback_market: bool = False  # 취소 후 시장가로 잡을지
+
     def validate(self) -> None:
         if not self.symbols:
             raise ConfigError("symbols 가 비어 있습니다")
@@ -114,6 +125,12 @@ class TradingConfig:
             raise ConfigError("poll_interval_sec 은 1초 이상이어야 합니다 (레이트리밋 보호)")
         if self.candle_limit < 2:
             raise ConfigError("candle_limit 은 2 이상이어야 합니다")
+        if self.order_type not in ("limit", "market"):
+            raise ConfigError(f"order_type 은 limit 또는 market 이어야 합니다: {self.order_type}")
+        if self.limit_offset_pct < 0:
+            raise ConfigError("limit_offset_pct 는 0 이상이어야 합니다")
+        if self.limit_timeout_sec <= 0:
+            raise ConfigError("limit_timeout_sec 은 0보다 커야 합니다")
 
 
 @dataclass

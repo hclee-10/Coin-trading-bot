@@ -6,6 +6,7 @@ import Controls from './components/Controls.jsx'
 import Positions from './components/Positions.jsx'
 import Chart from './components/Chart.jsx'
 import Performance from './components/Performance.jsx'
+import StrategyInfo from './components/StrategyInfo.jsx'
 import Logs from './components/Logs.jsx'
 
 const POLL_MS = 2000
@@ -17,6 +18,7 @@ export default function App() {
   const [positions, setPositions] = useState({ source: null, positions: [] })
   const [chart, setChart] = useState(null)
   const [performance, setPerformance] = useState(null)
+  const [catalog, setCatalog] = useState(null)
   const [logs, setLogs] = useState([])
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
@@ -68,6 +70,8 @@ export default function App() {
 
   useEffect(() => {
     if (!authed) return undefined
+    // 전략 목록은 바뀌지 않으므로 한 번만 받는다
+    api.strategies().then(setCatalog).catch(() => setCatalog(null))
     poll()
     const timer = setInterval(poll, POLL_MS)
     return () => clearInterval(timer)
@@ -178,6 +182,8 @@ export default function App() {
         candles={chart?.candles}
         markers={chart?.markers}
       />
+
+      <StrategyInfo catalog={catalog} />
 
       <Positions positions={positions.positions} source={positions.source} />
 

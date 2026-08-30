@@ -75,6 +75,10 @@ class TradingEngine:
             self.risk,
             dry_run=dry_run,
             allow_reverse=config.trading.allow_reverse,
+            order_type=config.trading.order_type,
+            limit_offset_pct=config.trading.limit_offset_pct,
+            limit_timeout_sec=config.trading.limit_timeout_sec,
+            limit_fallback_market=config.trading.limit_fallback_market,
         )
         self._stop = threading.Event()
         # 웹 대시보드가 폴링으로 읽어 가는 최신 상태. 루프 스레드가 쓰고 다른
@@ -100,6 +104,20 @@ class TradingEngine:
                 "%s 준비 완료 (1계약=%s %s, 최소수량=%s)",
                 symbol, market.contract_size, market.base, market.min_amount,
             )
+            # 재시작하면 미체결 주문 추적 상태가 사라진다. 남아 있는 주문을
+            # 알려 주어 사람이 판단할 수 있게 한다 — 손절 주문일 수도 있으므로
+            # 자동으로 취소하지는 않는다.
+            if not self.dry_run:
+                try:
+                    open_orders = self.exchange.fetch_open_orders(symbol)
+                    if open_orders:
+                        log.warning(
+                            "%s 에 미체결 주문 %d건이 남아 있습니다 — 손절 주문일 수 있어 "
+                            "자동으로 취소하지 않습니다. 대시보드에서 확인하세요.",
+                            symbol, len(open_orders),
+                        )
+                except Exception:
+                    log.debug("%s 미체결 주문 조회 실패", symbol, exc_info=True)
         mode = "DRY-RUN (주문 전송 안 함)" if self.dry_run else "*** 실거래 ***"
         log.info(
             "엔진 준비 완료 — %s | 거래소=%s 전략=%s 심볼=%s 주기=%ss",
@@ -208,6 +226,13 @@ class TradingEngine:
         open_count: int,
         candle_sink: dict[str, list[Candle]] | None = None,
     ) -> ExecutionResult:
+        # 미체결 지정가 주문이 있으면 그 결과부터 확인한다. 체결됐으면 여기서
+        # 손절 주문이 걸리고, 아직이면 이번 주기는 기다린다.
+        if not self.dry_run:
+            pending_result = self.executor.reconcile(symbol, position)
+            if pending_result is not None:
+                return pending_result
+
         candles = self.exchange.fetch_candles(
             symbol, self.config.trading.timeframe, self.config.trading.candle_limit
         )

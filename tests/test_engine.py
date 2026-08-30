@@ -55,9 +55,12 @@ def test_prepare_sets_leverage_for_each_symbol():
 
 
 def test_cycle_routes_entry_signal_to_orders():
+    """시장가 모드에서는 한 주기 안에 진입과 보호주문이 모두 나간다."""
     ex = FakeExchange(price=100.0, equity=10_000.0)
     strategy = ScriptedStrategy([Signal(action=SignalAction.ENTER_LONG, reason="테스트")])
-    engine = TradingEngine(make_config(), ex, dry_run=False, strategy=strategy)
+    config = make_config()
+    config.trading.order_type = "market"
+    engine = TradingEngine(config, ex, dry_run=False, strategy=strategy)
 
     report = engine.run_cycle()
 

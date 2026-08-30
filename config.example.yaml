@@ -18,19 +18,38 @@ trading:
   allow_reverse: false        # true 면 반대 신호에서 청산 후 즉시 반대 진입
   close_positions_on_exit: false  # true 면 봇 종료 시 전 포지션 시장가 청산
 
+  # 주문 방식. limit 이면 maker 수수료(0.02%), market 이면 taker(0.05%).
+  # 왕복이면 0.04% 대 0.10% 로 두 배 넘게 차이난다.
+  #
+  # 대신 지정가는 체결이 보장되지 않고, 체결을 확인한 다음 주기에야 손절이
+  # 걸린다 — 그 사이(최대 폴링 주기 1회)는 손절 없이 노출된다.
+  # 손절이 즉시 필요하면 market 을 쓴다. 손절 주문 자체는 어느 쪽이든 시장가다.
+  order_type: limit
+  limit_offset_pct: 0.02      # 현재가에서 유리한 쪽으로 벌리는 폭(%)
+  limit_timeout_sec: 60       # 이 시간 안에 안 채워지면 취소
+  limit_fallback_market: false  # 취소 후 시장가로 잡을지
+
 strategy:
-  name: hold              # `python -m bot strategies` 로 목록 확인
+  # `python -m bot strategies` 로 목록을, `python -m bot strategy <이름>` 으로
+  # 자세한 설명을 볼 수 있습니다. hold 는 아무것도 매매하지 않습니다.
+  name: hold
   params: {}              # 전략의 self.params 로 전달됨
 
 risk:
-  risk_per_trade_pct: 0.5        # 손절 도달 시 잃을 자기자본 비율(%) — 수량은 여기서 역산
+  # tiers = 확신도에 따라 정해진 금액으로 진입 / risk = 손절 폭에서 수량 역산
+  sizing_mode: tiers
+  # 확신도 낮음 → 높음 순. 전략이 네 등급 중 하나를 내면 그 금액으로 들어간다.
+  notional_tiers: [50, 100, 150, 200]
+
   max_position_notional_pct: 20  # 자기자본 대비 포지션 명목가 상한(%)
   max_leverage: 5
   max_open_positions: 2
   max_daily_loss_pct: 3          # 일일 손실이 이 값을 넘으면 신규 진입 차단
   min_order_notional: 5
   default_stop_loss_pct: 1.0     # 전략이 손절가를 안 줄 때 사용
-  default_take_profit_pct: 2.0   # 0 이면 익절 주문을 걸지 않음
+  default_take_profit_pct: 0     # 0 = 익절 없음 (수익률 제한 두지 않음)
+
+  risk_per_trade_pct: 0.5        # sizing_mode: risk 일 때만 사용
 
 logging:
   level: INFO

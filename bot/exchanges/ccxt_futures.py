@@ -266,6 +266,51 @@ class CcxtFuturesExchange(FuturesExchange):
         )
         return _to_order(raw, symbol, side, amount, reduce_only)
 
+    def create_limit_order(
+        self,
+        symbol: str,
+        side: Side,
+        amount: float,
+        price: float,
+        *,
+        reduce_only: bool = False,
+        post_only: bool = True,
+    ) -> Order:
+        params: dict[str, Any] = {}
+        if reduce_only:
+            params["reduceOnly"] = True
+        if post_only:
+            # ccxt 가 거래소별 표현(Gate 는 timeInForce=PO)으로 바꿔 준다.
+            params["postOnly"] = True
+        limit_price = self.price_to_precision(symbol, price)
+        raw = self._call(
+            self._ex.create_order, symbol, "limit", side.value, amount, limit_price, params
+        )
+        return _to_order(raw, symbol, side, amount, reduce_only)
+
+    def fetch_order(self, order_id: str, symbol: str) -> Order | None:
+        self._require_markets()
+        try:
+            raw = self._ex.fetch_order(order_id, symbol)
+        except ccxt.OrderNotFound:
+            return None
+        except ccxt.BaseError as exc:
+            raise ExchangeError(f"{self.id} 주문 조회 실패({order_id}): {exc}") from exc
+        side = Side.BUY if (raw.get("side") or "buy").lower() == "buy" else Side.SELL
+        return _to_order(
+            raw, symbol, side, _maybe_float(raw.get("amount")) or 0.0,
+            bool(raw.get("reduceOnly")),
+        )
+
+    def cancel_order(self, order_id: str, symbol: str) -> None:
+        self._require_markets()
+        try:
+            self._ex.cancel_order(order_id, symbol)
+        except ccxt.OrderNotFound:
+            pass   # 이미 체결되었거나 취소됨 — 원하던 상태다
+        except ccxt.BaseError as exc:
+            raise ExchangeError(f"{self.id} 주문 취소 실패({order_id}): {exc}") from exc
+
     def create_stop_loss_order(
         self, symbol: str, side: Side, amount: float, stop_price: float
     ) -> Order:

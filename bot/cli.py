@@ -122,7 +122,7 @@ def build_parser() -> argparse.ArgumentParser:
     bt.add_argument("--symbol", help="심볼. 생략하면 설정의 첫 심볼")
     bt.add_argument("--equity", type=float, default=10_000.0, help="시작 자기자본")
     bt.add_argument(
-        "--order-type", choices=["market", "limit"], default="market",
+        "--order-type", choices=["market", "limit"], default=None,
         help="limit 이면 지정가를 흉내 낸다 — 수수료가 낮은 대신 체결되지 않는 신호가 생긴다",
     )
     bt.add_argument("--taker-fee", type=float, default=0.05, help="taker 수수료 %% (기본 0.05)")
@@ -392,7 +392,7 @@ def _cmd_backtest(config: Config, exchange, args) -> int:
             contract_size=market.contract_size,
             taker_fee=args.taker_fee / 100.0,
             maker_fee=args.maker_fee / 100.0,
-            order_type=args.order_type,
+            order_type=args.order_type or config.trading.order_type,
         )
         results.append(result)
 
@@ -421,7 +421,7 @@ def _print_backtest_table(results, args) -> None:
         )
 
     print()
-    if args.order_type == "limit":
+    if any(r.missed_entries for r in results):
         missed = sum(r.missed_entries for r in results)
         print(f"지정가 미체결로 넘긴 신호: {missed}건")
     print(

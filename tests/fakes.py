@@ -25,6 +25,7 @@ class FakeExchange(FuturesExchange):
         self.candle_count = candles
         self.positions: dict[str, Position] = {}
         self.my_trades: list[Fill] = []
+        self.open_orders: dict[str, Order] = {}
         self.sent_orders: list[Order] = []
         self.cancelled: list[str] = []
         self.leverage_calls: list[tuple[str, float, str]] = []
@@ -83,6 +84,38 @@ class FakeExchange(FuturesExchange):
 
     def create_market_order(self, symbol, side, amount, *, reduce_only=False) -> Order:
         return self._record(symbol, side, amount, "market", reduce_only)
+
+    def create_limit_order(self, symbol, side, amount, price, *,
+                           reduce_only=False, post_only=True):
+        order = self._record(symbol, side, amount, "limit", reduce_only, price)
+        # 기본은 미체결 상태로 둔다 — 테스트가 원할 때 fill_order() 로 채운다.
+        self.open_orders[order.id] = Order(
+            id=order.id, symbol=symbol, side=side, type="limit", amount=amount,
+            price=price, status="open", filled=0.0, reduce_only=reduce_only,
+        )
+        return self.open_orders[order.id]
+
+    def fetch_order(self, order_id, symbol):
+        return self.open_orders.get(order_id)
+
+    def cancel_order(self, order_id, symbol):
+        order = self.open_orders.get(order_id)
+        if order:
+            self.open_orders[order_id] = Order(
+                id=order.id, symbol=order.symbol, side=order.side, type=order.type,
+                amount=order.amount, price=order.price, status="canceled",
+                filled=order.filled, reduce_only=order.reduce_only,
+            )
+
+    def fill_order(self, order_id, *, price=None):
+        """테스트용 — 미체결 주문을 체결 처리한다."""
+        order = self.open_orders[order_id]
+        self.open_orders[order_id] = Order(
+            id=order.id, symbol=order.symbol, side=order.side, type=order.type,
+            amount=order.amount, price=price or order.price, status="closed",
+            filled=order.amount, average=price or order.price,
+            reduce_only=order.reduce_only,
+        )
 
     def create_stop_loss_order(self, symbol, side, amount, stop_price) -> Order:
         return self._record(symbol, side, amount, "stop", True, stop_price)

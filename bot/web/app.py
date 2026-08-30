@@ -257,6 +257,14 @@ def create_app(
             ) from exc
         return {"source": "exchange", "at": None, "positions": [asdict(p) for p in positions]}
 
+    @app.get("/api/strategies")
+    def get_strategies(_: str = Depends(require_auth)) -> dict:
+        """전략 목록과 설명. 지금 무엇이 왜 돌고 있는지 화면에서 보이게 한다."""
+        from bot.strategies import strategy_catalog
+
+        catalog = [e for e in strategy_catalog() if e["summary"]]
+        return {"active": config.strategy.name, "strategies": catalog}
+
     @app.get("/api/chart")
     def get_chart(symbol: str | None = None, _: str = Depends(require_auth)) -> dict:
         """캔들과 내 체결 지점. 차트에 매수/매도를 표시하는 데 쓴다."""

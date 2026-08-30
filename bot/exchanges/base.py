@@ -64,6 +64,31 @@ class FuturesExchange(ABC):
         ...
 
     @abstractmethod
+    def create_limit_order(
+        self,
+        symbol: str,
+        side: Side,
+        amount: float,
+        price: float,
+        *,
+        reduce_only: bool = False,
+        post_only: bool = True,
+    ) -> Order:
+        """지정가 주문. `post_only` 면 즉시 체결되는 경우 주문이 거부된다.
+
+        post-only 는 maker 수수료를 보장하는 대신, 가격이 이미 지나갔으면
+        체결 없이 취소된다. 그 경우를 호출자가 처리해야 한다.
+        """
+
+    @abstractmethod
+    def fetch_order(self, order_id: str, symbol: str) -> Order | None:
+        """주문 하나의 현재 상태. 없으면 None."""
+
+    @abstractmethod
+    def cancel_order(self, order_id: str, symbol: str) -> None:
+        """주문 하나를 취소한다. 이미 체결·취소되었으면 조용히 넘어간다."""
+
+    @abstractmethod
     def create_stop_loss_order(
         self, symbol: str, side: Side, amount: float, stop_price: float
     ) -> Order:
