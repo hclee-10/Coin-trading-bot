@@ -65,3 +65,58 @@ def test_explicit_flags_beat_env_defaults(monkeypatch):
     monkeypatch.setenv("PORT", "4321")
     args = parse_web("--host", "127.0.0.1", "--port", "9999")
     assert (args.host, args.port) == ("127.0.0.1", 9999)
+
+
+# --- check-env ------------------------------------------------------------
+def test_check_env_reports_a_broken_hash(monkeypatch, capsys):
+    """배포 환경에서 '분명히 넣었는데 왜 안 되냐'를 추측으로 풀지 않기 위한 명령."""
+    from bot.cli import main
+
+    monkeypatch.setenv("WEB_USERNAME", "trader")
+    monkeypatch.setenv("WEB_PASSWORD_HASH", "scrypt$$$")
+    monkeypatch.setenv("GATE_API_KEY", "k")
+    monkeypatch.setenv("GATE_API_SECRET", "s")
+    monkeypatch.setenv(
+        "CONFIG_YAML",
+        'exchange: {id: gate}\ntrading: {symbols: ["BTC/USDT:USDT"]}\n',
+    )
+
+    assert main(["check-env"]) == 1
+    out = capsys.readouterr().out
+    assert "WEB_PASSWORD_HASH" in out and "깨졌" in out
+
+
+def test_check_env_passes_when_everything_is_set(monkeypatch, capsys):
+    from bot.cli import main
+    from bot.web.auth import hash_password
+
+    monkeypatch.setenv("WEB_USERNAME", "trader")
+    monkeypatch.setenv("WEB_PASSWORD_HASH", hash_password("1234"))
+    monkeypatch.setenv("GATE_API_KEY", "k")
+    monkeypatch.setenv("GATE_API_SECRET", "s")
+    monkeypatch.setenv(
+        "CONFIG_YAML",
+        'exchange: {id: gate}\ntrading: {symbols: ["BTC/USDT:USDT"]}\n',
+    )
+
+    assert main(["check-env"]) == 0
+    assert "모두 정상" in capsys.readouterr().out
+
+
+def test_check_env_never_prints_values(monkeypatch, capsys):
+    from bot.cli import main
+    from bot.web.auth import hash_password
+
+    secret = "super-secret-api-key-value"
+    monkeypatch.setenv("WEB_USERNAME", "trader")
+    monkeypatch.setenv("WEB_PASSWORD_HASH", hash_password("1234"))
+    monkeypatch.setenv("GATE_API_KEY", secret)
+    monkeypatch.setenv("GATE_API_SECRET", secret)
+    monkeypatch.setenv(
+        "CONFIG_YAML",
+        'exchange: {id: gate}\ntrading: {symbols: ["BTC/USDT:USDT"]}\n',
+    )
+
+    main(["check-env"])
+
+    assert secret not in capsys.readouterr().out

@@ -87,6 +87,7 @@ cp config.example.yaml config.yaml
 ## 4. 실행
 
 ```bash
+python -m bot check-env     # 환경변수가 제대로 들어왔는지 점검 (값은 출력 안 함)
 python -m bot strategies    # 등록된 전략 목록
 python -m bot check         # 연결·잔고·심볼 규격 점검 (주문 없음)
 python -m bot positions     # 현재 포지션
@@ -232,6 +233,12 @@ Variables 탭에서 설정한다. **Railway 는 `PORT` 를 자동으로 주입�
 
 Settings → Networking → **Generate Domain** 을 누르면 `*.up.railway.app` 주소와
 HTTPS 인증서가 자동으로 붙는다.
+
+> **환경변수를 고쳤으면 서비스가 다시 시작되어야 적용된다.** Console 에서
+> `hash-password` 로 값을 만드는 것만으로는 아무것도 설정되지 않는다 — 출력된
+> 줄을 Variables 탭에 직접 붙여넣어야 한다. 잘 모르겠으면 Console 에서
+> `python -m bot check-env` 를 실행하면 서버가 실제로 무엇을 보고 있는지
+> 알려 준다 (값은 출력하지 않는다).
 
 ### 6) 배포 후 반드시 확인할 것
 

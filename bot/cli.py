@@ -102,6 +102,11 @@ def build_parser() -> argparse.ArgumentParser:
         "hash-password", help="웹 대시보드용 비밀번호 해시를 만든다 (WEB_PASSWORD_HASH)"
     )
 
+    sub.add_parser(
+        "check-env",
+        help="지금 이 환경에 어떤 환경변수가 들어와 있는지 점검한다 (값은 출력하지 않음)",
+    )
+
     web_cmd = sub.add_parser("web", help="웹 대시보드 서버를 실행한다")
     # PORT 는 Railway 등 PaaS 가 주입한다. 있으면 컨테이너 안이라는 뜻이므로
     # 모든 인터페이스에 바인드해야 플랫폼 라우터가 접속할 수 있다.
@@ -152,6 +157,9 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_hash_password()
 
     load_dotenv(args.env_file)
+
+    if args.command == "check-env":
+        return _cmd_check_env(args)
 
     # 대시보드는 설정이 잘못돼도 일단 뜬다 — 아래 _cmd_web 참조.
     if args.command == "web":
@@ -334,6 +342,62 @@ def _cmd_hash_password() -> int:
     print(f"{USERNAME_ENV}={username}")
     print(f"{PASSWORD_ENV}={encoded}")
     return 0
+
+
+def _cmd_check_env(args) -> int:
+    """서버가 실제로 보고 있는 환경변수 상태를 출력한다.
+
+    배포 환경에서 "분명히 넣었는데 왜 안 되냐" 를 추측으로 풀지 않기 위한
+    명령이다. 컨테이너 안에서 실행하면 서버와 같은 환경을 본다.
+    **값은 절대 출력하지 않고 이름과 상태만 보여 준다.**
+    """
+    from bot.web.auth import PASSWORD_ENV, USERNAME_ENV, is_valid_password_hash
+
+    print("환경변수 점검\n")
+
+    ok = True
+    try:
+        config = Config.load(args.config)
+        print(f"  CONFIG_YAML          설정됨 (거래소={config.exchange.id}, "
+              f"심볼={', '.join(config.trading.symbols)})")
+    except ConfigError as exc:
+        config = Config()
+        ok = False
+        print(f"  CONFIG_YAML          ✗ {exc}")
+
+    username = os.getenv(USERNAME_ENV, "").strip()
+    if username:
+        print(f"  {USERNAME_ENV:20s} 설정됨 ({len(username)}자)")
+    else:
+        ok = False
+        print(f"  {USERNAME_ENV:20s} ✗ 비어 있음")
+
+    encoded = os.getenv(PASSWORD_ENV, "").strip()
+    if not encoded:
+        ok = False
+        print(f"  {PASSWORD_ENV:20s} ✗ 비어 있음 — 아직 넣지 않았습니다")
+    elif is_valid_password_hash(encoded):
+        print(f"  {PASSWORD_ENV:20s} 설정됨 ({len(encoded)}자, 형식 정상)")
+    else:
+        ok = False
+        print(f"  {PASSWORD_ENV:20s} ✗ 값이 깨졌습니다 ({len(encoded)}자)")
+        print("                       `hash-password` 출력을 통째로 다시 넣으세요.")
+
+    prefix = config.exchange.id.upper()
+    try:
+        Credentials.from_env(config.exchange.id)
+        print(f"  {prefix + '_API_*':20s} 설정됨")
+    except ConfigError as exc:
+        ok = False
+        print(f"  {prefix + '_API_*':20s} ✗ {exc.args[0].split('.')[0]}")
+
+    print()
+    if ok:
+        print("모두 정상입니다. 대시보드에 로그인할 수 있어야 합니다.")
+    else:
+        print("✗ 표시된 항목을 고치세요. 환경변수를 바꾸면 서비스가 다시 시작되어야")
+        print("  적용됩니다 — Console 에서 값을 만드는 것만으로는 적용되지 않습니다.")
+    return 0 if ok else 1
 
 
 def _log_env_diagnostics(config: Config) -> None:
