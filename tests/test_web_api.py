@@ -133,6 +133,20 @@ def test_config_endpoint_exposes_no_secrets(env):
     assert body["risk"]["max_daily_loss_pct"] == 3.0
 
 
+def test_config_endpoint_exposes_sizing_and_order_settings(env):
+    """대시보드가 "얼마로 매매하는지" 를 화면에 그리려면 이 값들이 필요하다."""
+    client, *_ = env
+    body = client.get("/api/config", headers=login(client)).json()
+    assert body["risk"]["sizing_mode"] == "tiers"
+    assert body["risk"]["notional_tiers"] == [50.0, 100.0, 150.0, 200.0]
+    # 사용자가 요구한 "수익률 제한 없음" 이 기본값이어야 한다
+    assert body["risk"]["default_take_profit_pct"] == 0.0
+    assert body["trading"]["order_type"] == "limit"
+    assert "limit_offset_pct" in body["trading"]
+    assert "limit_timeout_sec" in body["trading"]
+    assert "limit_fallback_market" in body["trading"]
+
+
 def test_security_headers_are_set(env):
     client, *_ = env
     headers = client.get("/healthz").headers

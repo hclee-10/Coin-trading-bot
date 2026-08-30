@@ -3,6 +3,7 @@ import { api, getToken, setToken } from './api.js'
 import Login from './components/Login.jsx'
 import StatusCards from './components/StatusCards.jsx'
 import Controls from './components/Controls.jsx'
+import Settings from './components/Settings.jsx'
 import Positions from './components/Positions.jsx'
 import Chart from './components/Chart.jsx'
 import Performance from './components/Performance.jsx'
@@ -24,6 +25,7 @@ export default function App() {
   const [chart, setChart] = useState(null)
   const [performance, setPerformance] = useState(null)
   const [catalog, setCatalog] = useState(null)
+  const [config, setConfig] = useState(null)
   const [stale, setStale] = useState(false)
   const [leaderboard, setLeaderboard] = useState(null)
   const [logs, setLogs] = useState([])
@@ -84,8 +86,9 @@ export default function App() {
 
   useEffect(() => {
     if (!authed) return undefined
-    // 전략 목록은 바뀌지 않으므로 한 번만 받는다
+    // 전략 목록과 거래 설정은 프로세스가 사는 동안 바뀌지 않으므로 한 번만 받는다
     api.strategies().then(setCatalog).catch(() => setCatalog(null))
+    api.config().then(setConfig).catch(() => setConfig(null))
     api
       .build()
       .then(({ bundle }) => setStale(Boolean(bundle) && bundle !== RUNNING_BUNDLE))
@@ -202,6 +205,8 @@ export default function App() {
         onStop={() => act(() => api.stop())}
         onCloseAll={(confirm) => act(() => api.closeAll(confirm))}
       />
+
+      <Settings config={config} equity={status.equity} />
 
       <Chart
         symbol={chart?.symbol || status.symbols[0]}
