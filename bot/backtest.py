@@ -7,8 +7,8 @@
 * 전략은 **i 번째 봉의 종가까지만** 본다.
 * 주문은 **i+1 번째 봉에서** 체결된다 — 판단한 그 봉의 종가로 체결시키면
   실제로는 불가능한 거래가 된다.
-* 한 봉 안에서 손절과 청산 신호가 겹치면 **손절이 먼저** 일어난 것으로 본다.
-  봉 안의 순서를 알 수 없으므로 불리한 쪽을 가정한다.
+* 한 봉 안에서 손절과 익절(또는 청산 신호)이 겹치면 **손절이 먼저** 일어난
+  것으로 본다. 봉 안의 순서를 알 수 없으므로 불리한 쪽을 가정한다.
 
 수수료는 실제 값을 넣는다. 이걸 빼면 대부분의 단타 전략이 흑자로 보인다.
 """
@@ -121,6 +121,7 @@ class _OpenTrade:
     stop_loss: float
     entry_fee: float
     conviction: float
+    take_profit: float | None = None
     funding_paid: float = 0.0
     next_funding_ms: int = 0
 
@@ -202,6 +203,23 @@ def run_backtest(
                 result.total_fee += trade.fee
                 open_trade = None
 
+        # --- 1.5) 익절 확인. 손절과 같은 봉에 겹치면 손절이 먼저다(불리한 가정).
+        #     익절은 지정가 주문이므로 maker 수수료로 체결된다.
+        if open_trade is not None and open_trade.take_profit:
+            reached = (
+                fill_bar.high >= open_trade.take_profit
+                if open_trade.side is PositionSide.LONG
+                else fill_bar.low <= open_trade.take_profit
+            )
+            if reached:
+                equity, trade = _close(
+                    open_trade, open_trade.take_profit, fill_bar.timestamp,
+                    equity, contract_size, maker_fee, "target",
+                )
+                result.trades.append(trade)
+                result.total_fee += trade.fee
+                open_trade = None
+
         # --- 2) 전략 판단 (i 번째 봉까지만 본다)
         position = (
             Position(
@@ -274,6 +292,7 @@ def run_backtest(
                         stop_loss=sizing.stop_loss,
                         entry_fee=entry_fee,
                         conviction=signal.strength,
+                        take_profit=sizing.take_profit,
                     )
 
         # --- 4) 평가금액 기록 (미실현 손익 포함) — 최대 낙폭은 이걸로 재야 정확하다

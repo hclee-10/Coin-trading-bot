@@ -58,6 +58,7 @@ class PaperPosition:
     stop_loss: float
     entry_fee: float
     conviction: float
+    take_profit: float = 0.0           # 0 = 익절 없음
     worst_excursion_pct: float = 0.0   # 진입가 대비 최대 역행폭(%)
     funding_paid: float = 0.0          # 보유하는 동안 낸 펀딩비 누계(수입이면 음수)
     next_funding_ms: int = 0           # 다음 정산 시각 (0 = 아직 정하지 않음)
@@ -184,6 +185,7 @@ class PaperArena:
                 next_funding_ms=(
                     row["next_funding_ms"] if "next_funding_ms" in row.keys() else 0
                 ),
+                take_profit=row["take_profit"] if "take_profit" in row.keys() else 0.0,
             )
         log.info(
             "모의매매 준비 — 전략 %d개, 진행 중인 가상 포지션 %d개",
@@ -269,7 +271,25 @@ class PaperArena:
                 self._close(name, position, position.stop_loss, now_ms, "stop")
                 position = None
 
-        # 3) 전략 판단
+        # 3) 익절 확인. 같은 봉에서 손절과 익절이 둘 다 스쳤으면 손절이 먼저
+        #    걸린 것으로 본다 — 봉 안의 순서를 모르므로 불리한 쪽을 가정한다.
+        if position is not None and position.take_profit > 0:
+            best = price
+            if candles:
+                best = (
+                    candles[-1].high if position.side is PositionSide.LONG
+                    else candles[-1].low
+                )
+            reached = (
+                best >= position.take_profit
+                if position.side is PositionSide.LONG
+                else best <= position.take_profit
+            )
+            if reached:
+                self._close(name, position, position.take_profit, now_ms, "target")
+                position = None
+
+        # 4) 전략 판단
         equity = self._equity(name, account)
         model_position = (
             Position(
@@ -292,7 +312,7 @@ class PaperArena:
             )
         )
 
-        # 4) 체결
+        # 5) 체결
         if position is not None:
             if signal.action is SignalAction.EXIT:
                 self._close(name, position, price, now_ms, "signal")
@@ -403,6 +423,7 @@ class PaperArena:
             stop_loss=decision.stop_loss,
             entry_fee=entry_fee,
             conviction=signal.strength,
+            take_profit=decision.take_profit or 0.0,
         )
         self._positions[(name, symbol)] = position
         # next_funding_ms 는 다음 주기의 _settle_funding 이 채운다. 방금 연
@@ -418,6 +439,7 @@ class PaperArena:
             "worst_excursion_pct": position.worst_excursion_pct,
             "funding_paid": position.funding_paid,
             "next_funding_ms": position.next_funding_ms,
+            "take_profit": position.take_profit,
         })
 
     def _close(

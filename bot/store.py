@@ -91,6 +91,7 @@ _MIGRATIONS: tuple[tuple[str, str, str], ...] = (
     ("paper_trades", "funding", "REAL NOT NULL DEFAULT 0"),
     ("paper_positions", "funding_paid", "REAL NOT NULL DEFAULT 0"),
     ("paper_positions", "next_funding_ms", "INTEGER NOT NULL DEFAULT 0"),
+    ("paper_positions", "take_profit", "REAL NOT NULL DEFAULT 0"),
 )
 
 
@@ -281,12 +282,13 @@ class Store:
             self._db.execute(
                 "INSERT OR REPLACE INTO paper_positions (strategy, symbol, side, opened_at,"
                 " entry_price, amount, notional, stop_loss, entry_fee, conviction,"
-                " worst_excursion_pct, funding_paid, next_funding_ms)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                " worst_excursion_pct, funding_paid, next_funding_ms, take_profit)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (strategy, symbol, data["side"], data["opened_at"], data["entry_price"],
                  data["amount"], data["notional"], data["stop_loss"], data["entry_fee"],
                  data["conviction"], data.get("worst_excursion_pct", 0.0),
-                 data.get("funding_paid", 0.0), data.get("next_funding_ms", 0)),
+                 data.get("funding_paid", 0.0), data.get("next_funding_ms", 0),
+                 data.get("take_profit", 0.0)),
             )
             self._db.commit()
 

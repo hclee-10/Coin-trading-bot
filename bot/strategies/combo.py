@@ -10,7 +10,7 @@
 
 from __future__ import annotations
 
-from bot.indicators import ema, macd, obv, rsi, sma, stochastic
+from bot.indicators import atr, ema, macd, obv, rsi, sma, stochastic
 from bot.models import Conviction, PositionSide, Signal, SignalAction
 from bot.strategies.base import Strategy, StrategyContext, register_strategy
 from bot.strategies.trend import _atr_stop, _gap_conviction
@@ -322,3 +322,225 @@ EMA20 상향 돌파)가 나와도 **OBV 가 자기 이동평균 위에 있을 �
                                               PositionSide.SHORT, self.atr_multiplier),
                           reason="가격 이탈 + OBV 분산 확인")
         return Signal(reason="돌파 없음")
+
+
+@register_strategy("elder_impulse")
+class ElderImpulseStrategy(Strategy):
+    summary = "추세(EMA13)와 가속(MACD 히스토그램)이 함께 켜지는 봉에서 진입"
+    category = "combo"
+    description = """
+알렉산더 엘더의 임펄스 시스템이다. 봉마다 두 가지를 묻는다 — 관성(EMA13 이
+오르는 중인가)과 가속(MACD 히스토그램이 커지는 중인가). 둘 다 켜지면 녹색
+(매수 허용), 둘 다 꺼지면 적색(매도 허용), 엇갈리면 청색(관망)이다.
+
+핵심 통찰은 **기울기를 본다**는 것이다. 다른 EMA/MACD 조합들은 위치(가격이 선
+위인가, 히스토그램이 0 위인가)를 보지만, 임펄스는 방향의 변화율을 본다 — 선이
+아래에 있어도 오르기 시작했으면 켜진 것이다. 그래서 바닥 전환을 위치 기반
+조합보다 일찍 잡는다.
+
+진입은 색이 반대색/청색에서 **막 녹색(적색)으로 바뀌는 봉**이다. 청산은 색이
+꺼지면(청색 포함) 한다 — 엘더의 원칙대로, 사도 되는 상태가 아니면 들고 있지도
+않는다.
+
+**강점**: 기울기 기반이라 전환을 일찍 잡는다. 관망 상태(청색)가 내장돼 있다.
+**약점**: 기울기는 위치보다 예민하다 — 이틀 연속 같은 색을 유지 못 하는 횡보
+에서는 진입·청산이 반복된다.
+"""
+    algorithm = """
+**지표**  EMA(13)의 기울기, MACD(12,26,9) 히스토그램의 기울기, ATR(14)
+
+**색 판정** (봉마다)
+- 녹색: EMA13 상승 그리고 히스토그램 증가
+- 적색: EMA13 하락 그리고 히스토그램 감소
+- 청색: 엇갈림 (관망)
+
+**진입**
+- 롱: 직전 봉이 녹색이 아니었는데 이번 봉이 녹색
+- 숏: 직전 봉이 적색이 아니었는데 이번 봉이 적색
+
+**청산**  롱은 녹색이 꺼지면(청색·적색), 숏은 적색이 꺼지면 청산.
+
+**손절**  진입가 ∓ (ATR14 × 2.0)
+
+**확신도**  히스토그램 증가폭 ÷ ATR
+- ≥ 0.1 → VERY_HIGH · ≥ 0.05 → HIGH · ≥ 0.02 → MEDIUM · 그 외 LOW
+
+**파라미터**  `ema_period`, `fast`, `slow`, `signal`, `atr_multiplier`
+"""
+
+    def setup(self) -> None:
+        self.ema_period = int(self.params.get("ema_period", 13))
+        self.fast = int(self.params.get("fast", 12))
+        self.slow = int(self.params.get("slow", 26))
+        self.signal_period = int(self.params.get("signal", 9))
+        self.atr_multiplier = float(self.params.get("atr_multiplier", 2.0))
+
+    @property
+    def warmup_candles(self) -> int:
+        return self.slow + self.signal_period + 20
+
+    def _colors(self, closes) -> tuple[int, int] | None:
+        """(이번 봉 색, 직전 봉 색). 1=녹색, -1=적색, 0=청색."""
+        trend = ema(closes, self.ema_period)
+        _, _, histogram = macd(closes, self.fast, self.slow, self.signal_period)
+        needed = (trend[-1], trend[-2], trend[-3],
+                  histogram[-1], histogram[-2], histogram[-3])
+        if any(v is None for v in needed):
+            return None
+
+        def color(t_now, t_prev, h_now, h_prev):
+            if t_now > t_prev and h_now > h_prev:
+                return 1
+            if t_now < t_prev and h_now < h_prev:
+                return -1
+            return 0
+
+        return (
+            color(trend[-1], trend[-2], histogram[-1], histogram[-2]),
+            color(trend[-2], trend[-3], histogram[-2], histogram[-3]),
+        )
+
+    def generate(self, ctx: StrategyContext) -> Signal:
+        candles = ctx.closed_candles
+        if len(candles) < self.warmup_candles:
+            return Signal(reason="워밍업 부족")
+
+        closes = [c.close for c in candles]
+        colors = self._colors(closes)
+        if colors is None:
+            return Signal(reason="지표 계산 불가")
+        now, before = colors
+        price = closes[-1]
+
+        if ctx.position.side is PositionSide.LONG and now != 1:
+            return Signal(action=SignalAction.EXIT, reason="녹색 꺼짐")
+        if ctx.position.side is PositionSide.SHORT and now != -1:
+            return Signal(action=SignalAction.EXIT, reason="적색 꺼짐")
+        if ctx.position.is_open:
+            return Signal(reason="임펄스 유지")
+
+        _, _, histogram = macd(closes, self.fast, self.slow, self.signal_period)
+        atr_values = atr(candles, 14)
+        if atr_values[-1] is None or atr_values[-1] == 0:
+            return Signal(reason="지표 계산 불가")
+        accel = abs(histogram[-1] - histogram[-2]) / atr_values[-1]
+        conviction = (
+            Conviction.VERY_HIGH.value if accel >= 0.1
+            else Conviction.HIGH.value if accel >= 0.05
+            else Conviction.MEDIUM.value if accel >= 0.02
+            else Conviction.LOW.value
+        )
+        if now == 1 and before != 1:
+            return Signal(action=SignalAction.ENTER_LONG, strength=conviction,
+                          stop_loss=_atr_stop(candles, len(candles) - 1, price,
+                                              PositionSide.LONG, self.atr_multiplier),
+                          reason=f"임펄스 녹색 점등 (가속 {accel:.2f} ATR)")
+        if now == -1 and before != -1:
+            return Signal(action=SignalAction.ENTER_SHORT, strength=conviction,
+                          stop_loss=_atr_stop(candles, len(candles) - 1, price,
+                                              PositionSide.SHORT, self.atr_multiplier),
+                          reason=f"임펄스 적색 점등 (가속 {accel:.2f} ATR)")
+        return Signal(reason={1: "녹색 지속", -1: "적색 지속", 0: "청색 — 관망"}[now])
+
+
+@register_strategy("force_index")
+class ForceIndexStrategy(Strategy):
+    summary = "가격 변화 × 거래량(힘 지수)이 0선을 넘으면 추세 방향으로 진입"
+    category = "combo"
+    description = """
+엘더의 힘 지수(Force Index)는 한 봉의 '힘'을 **가격 변화량 × 거래량**으로
+정의한다. 1% 올랐어도 거래량이 두 배면 힘이 두 배다 — obv_trend 가 거래량의
+방향 누적을 본다면, 이쪽은 **가격 변화의 크기까지 곱해서** 힘의 세기를 잰다.
+
+원 지표는 잡음이 심해 EMA(13)로 평활해서 쓴다. 진입은 평활된 힘 지수가 0선을
+넘는 순간 — 매수 측의 힘이 매도 측을 실제로 넘어섰다는 뜻이다. 여기에 EMA(22)
+방향 필터를 얹어, 힘의 전환이 큰 흐름과 같은 방향일 때만 받는다.
+
+거래량 데이터가 무의미한 환경에서는 힘 지수가 가격 변화의 평활값으로 퇴화하는데,
+그래도 모멘텀 지표로서 동작하므로 그대로 쓴다 — 거래량이 살아 있는 실시세에서
+진가가 나온다.
+
+**강점**: 가격과 거래량을 한 숫자로 묶는다. 계산이 단순하고 빠르다.
+**약점**: 급등 한 봉이 지수를 크게 흔든다(평활해도 남는다). 거래량 품질에
+성적이 좌우된다.
+"""
+    algorithm = """
+**지표**  힘 지수 = EMA13( (종가 − 직전 종가) × 거래량 ), EMA(22), ATR(14)
+
+**진입**
+- 롱: 힘 지수가 0 이하 → 초과로 전환. 종가 > EMA22 (추세 일치)면 정상 확신,
+  불일치면 LOW 로만 진입 — 전환점에서는 힘 지수가 EMA 보다 먼저 돈다.
+- 숏: 거울상
+
+**청산**  힘 지수가 반대로 0선을 넘으면 청산.
+
+**손절**  진입가 ∓ (ATR14 × 2.0)
+
+**확신도**  |힘 지수| 를 최근 100봉 힘 지수 절대값의 평균과 비교
+- ≥ 2배 → VERY_HIGH · ≥ 1.3배 → HIGH · ≥ 0.7배 → MEDIUM · 그 외 LOW
+
+**파라미터**  `force_period`(13), `trend_period`(22), `atr_multiplier`
+"""
+
+    def setup(self) -> None:
+        self.force_period = int(self.params.get("force_period", 13))
+        self.trend_period = int(self.params.get("trend_period", 22))
+        self.atr_multiplier = float(self.params.get("atr_multiplier", 2.0))
+
+    @property
+    def warmup_candles(self) -> int:
+        return max(self.force_period, self.trend_period) + 30
+
+    def generate(self, ctx: StrategyContext) -> Signal:
+        candles = ctx.closed_candles
+        if len(candles) < self.warmup_candles:
+            return Signal(reason="워밍업 부족")
+
+        closes = [c.close for c in candles]
+        raw = [0.0] + [
+            (candles[i].close - candles[i - 1].close) * candles[i].volume
+            for i in range(1, len(candles))
+        ]
+        force = ema(raw, self.force_period)
+        trend = ema(closes, self.trend_period)
+        if force[-1] is None or force[-2] is None or trend[-1] is None:
+            return Signal(reason="지표 계산 불가")
+
+        current, previous = force[-1], force[-2]
+        price = closes[-1]
+
+        if ctx.position.side is PositionSide.LONG and current < 0:
+            return Signal(action=SignalAction.EXIT, reason="힘 지수 음전환")
+        if ctx.position.side is PositionSide.SHORT and current > 0:
+            return Signal(action=SignalAction.EXIT, reason="힘 지수 양전환")
+        if ctx.position.is_open:
+            return Signal(reason="힘 우위 유지")
+
+        window = [abs(v) for v in force[-100:] if v is not None]
+        typical = sum(window) / len(window) if window else 0.0
+        ratio = abs(current) / typical if typical > 0 else 0.0
+        conviction = (
+            Conviction.VERY_HIGH.value if ratio >= 2
+            else Conviction.HIGH.value if ratio >= 1.3
+            else Conviction.MEDIUM.value if ratio >= 0.7
+            else Conviction.LOW.value
+        )
+        # 추세 필터: 전환점에서는 힘 지수가 EMA22 보다 먼저 도는 것이 정상이라,
+        # 불일치를 거부하면 좋은 전환까지 다 버리게 된다. 대신 최소 금액으로 건다.
+        if previous <= 0 < current:
+            aligned = price > trend[-1]
+            return Signal(action=SignalAction.ENTER_LONG,
+                          strength=conviction if aligned else Conviction.LOW.value,
+                          stop_loss=_atr_stop(candles, len(candles) - 1, price,
+                                              PositionSide.LONG, self.atr_multiplier),
+                          reason=f"매수 힘 우위 전환 (세기 ×{ratio:.1f}"
+                                 f"{'' if aligned else ', 추세 미확인'})")
+        if previous >= 0 > current:
+            aligned = price < trend[-1]
+            return Signal(action=SignalAction.ENTER_SHORT,
+                          strength=conviction if aligned else Conviction.LOW.value,
+                          stop_loss=_atr_stop(candles, len(candles) - 1, price,
+                                              PositionSide.SHORT, self.atr_multiplier),
+                          reason=f"매도 힘 우위 전환 (세기 ×{ratio:.1f}"
+                                 f"{'' if aligned else ', 추세 미확인'})")
+        return Signal(reason="힘 전환 없음")

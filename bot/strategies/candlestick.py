@@ -120,6 +120,7 @@ class EngulfingStrategy(Strategy):
                 action=SignalAction.ENTER_LONG,
                 strength=_size_conviction(body, atr_values[-1]),
                 stop_loss=current.low - atr_values[-1] * 0.25,
+                take_profit=baseline[-1],   # 되돌림 목표 = SMA20
                 reason=f"하락 뒤 상승 장악형 (몸통 {body / atr_values[-1]:.1f} ATR)",
             )
         if bear_engulf and price > baseline[-1]:
@@ -127,6 +128,7 @@ class EngulfingStrategy(Strategy):
                 action=SignalAction.ENTER_SHORT,
                 strength=_size_conviction(body, atr_values[-1]),
                 stop_loss=current.high + atr_values[-1] * 0.25,
+                take_profit=baseline[-1],
                 reason=f"상승 뒤 하락 장악형 (몸통 {body / atr_values[-1]:.1f} ATR)",
             )
         return Signal(reason="장악형 없음")
@@ -214,6 +216,7 @@ class LiquiditySweepStrategy(Strategy):
                 action=SignalAction.ENTER_LONG,
                 strength=_sweep_conviction(depth, atr_values[-1]),
                 stop_loss=c.low - atr_values[-1] * 0.1,
+                take_profit=baseline[-1],   # 되돌림 목표 = SMA20
                 reason=f"저점 스윕 후 복귀 (깊이 {depth / atr_values[-1]:.1f} ATR)",
             )
         if swept_high:
@@ -222,6 +225,7 @@ class LiquiditySweepStrategy(Strategy):
                 action=SignalAction.ENTER_SHORT,
                 strength=_sweep_conviction(depth, atr_values[-1]),
                 stop_loss=c.high + atr_values[-1] * 0.1,
+                take_profit=baseline[-1],
                 reason=f"고점 스윕 후 복귀 (깊이 {depth / atr_values[-1]:.1f} ATR)",
             )
         return Signal(reason="스윕 없음")
