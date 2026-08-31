@@ -450,9 +450,296 @@ R1 = 2P − 전일 저가. 장중 트레이더들이 수십 년째 쓰는 고전
         if previous < s1 <= price:
             return Signal(action=SignalAction.ENTER_LONG, strength=conviction,
                           stop_loss=s1 - day_range * 0.25,
+                          take_profit=pivot,   # 중심 피봇이 목표다
                           reason=f"S1 지지 복귀 (목표 P {pivot:.2f})")
         if previous > r1 >= price:
             return Signal(action=SignalAction.ENTER_SHORT, strength=conviction,
                           stop_loss=r1 + day_range * 0.25,
+                          take_profit=pivot,
                           reason=f"R1 저항 확인 (목표 P {pivot:.2f})")
         return Signal(reason="피봇 레벨 사이")
+
+
+@register_strategy("double_bottom")
+class DoubleBottomStrategy(Strategy):
+    summary = "쌍바닥(W) 넥라인 돌파에서 매수, 패턴 높이만큼을 목표로"
+    category = "reversion"
+    description = """
+쌍바닥은 가장 유명한 반전 패턴이다 — 같은 가격대에서 두 번 바닥을 찍으면(첫
+바닥의 저점이 두 번째에도 지켜지면) 그 가격대에 실제 매수 수요가 있다는 것이
+두 번 검증된 셈이다. 진입은 바닥 확인이 아니라 **넥라인(두 바닥 사이의 반등
+고점) 돌파**에서 한다 — 돌파 전의 쌍바닥은 아직 그냥 횡보다.
+
+이 패턴의 매력은 **목표가가 패턴 안에 정의**된다는 것이다: 고전 규칙대로
+넥라인에서 패턴 높이(넥라인 − 바닥)만큼 위를 목표로 잡고, 그 가격을 익절가로
+건다. 손절은 두 번째 바닥 아래 — 바닥이 깨지면 패턴 자체가 무효다. 목표와
+손절이 모두 구조에서 나오므로 손익비가 진입 전에 계산된다.
+
+두 번째 바닥은 첫 바닥과 정확히 같은 레벨일 필요는 없다 — 첫 반등을 일부
+되돌리며 첫 바닥 위에서 버텼으면 인정하되, 되돌림이 깊을수록(같은 레벨에
+가까울수록) 확신을 올린다. 두 번째 바닥이 첫 바닥보다 높은
+'higher-low 쌍바닥'은 수요가 더 위에서 받아졌다는 뜻이라 오히려 강세 변형으로
+친다. 쌍봉(M)은 전체가 거울상으로 숏이다.
+
+**강점**: 목표·손절·손익비가 진입 전에 확정된다. 패턴 근거(수요 이중 검증)가
+직관적이다.
+**약점**: 넥라인 돌파를 기다리는 동안 되돌림의 상당 부분이 지나간다. 횡보장의
+모든 굴곡이 쌍바닥처럼 보이는 착시가 있다 — 프랙탈 확정 지연이 그 일부를 걸러
+줄 뿐이다.
+"""
+    algorithm = """
+**지표**  프랙탈 피봇(좌우 3봉), ATR(14)
+
+**패턴** (쌍바닥, 롱 기준 — 쌍봉은 거울상)
+- 첫 바닥: 그 앞 최대 5개 스윙 저점 중 60봉 이내의 것. 넥라인 = 두 저점 사이
+  최고가, 높이 = 넥라인 − 첫 바닥
+- 두 번째 바닥: 15봉 이내에 확정된 마지막 스윙 저점. 첫 바닥 위에서 버텼고
+  (저점 ≥ 첫 바닥 − ATR × 0.25), 첫 반등의 15% 이상을 되돌렸다
+  (되돌림 비율 = (넥라인 − 두 번째 저점) ÷ 높이 ≥ 0.15 — 얕은 되돌림은
+  확신도 LOW 로만 진입하고, 깊을수록 등급이 올라간다)
+
+**진입**  종가가 넥라인 위 (피봇 확정 지연 중에 지나간 돌파도 인정 — 최근
+strength+1 봉 안에 넥라인 아래 종가가 있었어야 한다). 단, 넥라인에서 패턴
+높이의 30% 이상 지나쳤으면 추격하지 않는다.
+
+**청산**  목표가(넥라인 + 패턴 높이) 도달 — 진입 시 **익절가**로 걸어 둔다.
+신호 청산은 없다: 목표 아니면 손절, 구조가 전부 정한다.
+
+**손절**  두 번째 바닥 − ATR × 0.25 — 바닥이 깨지면 패턴 무효.
+
+**확신도**  되돌림 비율 (1.0 = 완전한 같은 레벨 쌍바닥)
+- ≥ 0.8 → VERY_HIGH · ≥ 0.6 → HIGH · ≥ 0.45 → MEDIUM · 그 외 LOW
+
+**파라미터**  `strength`, `min_retest`(0.15), `freshness`(15), `max_span`(60)
+"""
+
+    def setup(self) -> None:
+        self.strength = int(self.params.get("strength", 3))
+        self.min_retest = float(self.params.get("min_retest", 0.15))
+        self.freshness = int(self.params.get("freshness", 15))
+        self.max_span = int(self.params.get("max_span", 60))
+
+    @property
+    def warmup_candles(self) -> int:
+        return 80
+
+    def generate(self, ctx: StrategyContext) -> Signal:
+        candles = ctx.closed_candles
+        if len(candles) < self.warmup_candles:
+            return Signal(reason="워밍업 부족")
+
+        atr_values = atr(candles, 14)
+        if atr_values[-1] is None or atr_values[-1] == 0:
+            return Signal(reason="지표 계산 불가")
+        price, previous = candles[-1].close, candles[-2].close
+
+        if ctx.position.is_open:
+            # 목표(익절)와 손절이 구조를 전부 정한다 — 신호 청산은 없다.
+            return Signal(reason="목표/손절 대기")
+
+        lows = pivot_lows(candles, self.strength)
+        highs = pivot_highs(candles, self.strength)
+
+        # 마지막 피봇이 신선해야 하고, 첫 바닥은 그 앞 몇 개 중에서 찾는다.
+        # 두 번째 바닥은 첫 바닥 위에서 버티며 첫 반등의 30% 이상을 되돌렸으면
+        # 인정한다 — 정확히 같은 레벨만 고집하면 higher-low 쌍바닥을 다 버린다.
+        buffer = atr_values[-1] * 0.25
+        if len(lows) >= 2:
+            second = lows[-1]
+            fresh = len(candles) - 1 - second <= self.strength + self.freshness
+            if fresh:
+                second_low = candles[second].low
+                for first in reversed(lows[-6:-1]):
+                    if second - first > self.max_span:
+                        break  # 너무 먼 짝은 패턴이 아니라 시장 한 주기다
+                    first_low = candles[first].low
+                    neckline = max(c.high for c in candles[first : second + 1])
+                    height = neckline - first_low
+                    if height <= 0 or second_low < first_low - buffer:
+                        continue
+                    retest = (neckline - second_low) / height
+                    if retest < self.min_retest:
+                        continue
+                    # 피봇 확정 지연(strength봉) 사이에 돌파가 지나갔을 수 있다 —
+                    # 최근 몇 봉 안에 넥라인 아래가 있었고 지금 위라면 돌파로 치되,
+                    # 높이의 30% 이상 지나쳤으면 추격하지 않는다.
+                    recently_below = any(
+                        c.close <= neckline
+                        for c in candles[-2 - self.strength : -1]
+                    )
+                    broke = (
+                        price > neckline and recently_below
+                        and price - neckline <= height * 0.3
+                    )
+                    if broke:
+                        return Signal(
+                            action=SignalAction.ENTER_LONG,
+                            strength=_retest_conviction(retest),
+                            stop_loss=second_low - buffer,
+                            take_profit=neckline + height,
+                            reason=f"쌍바닥 넥라인 돌파 (되돌림 {retest:.0%}, 목표 +{height:.6g})",
+                        )
+                    break  # 유효한 짝을 찾았으면 돌파 여부와 무관하게 종료
+        if len(highs) >= 2:
+            second = highs[-1]
+            fresh = len(candles) - 1 - second <= self.strength + self.freshness
+            if fresh:
+                second_high = candles[second].high
+                for first in reversed(highs[-6:-1]):
+                    if second - first > self.max_span:
+                        break
+                    first_high = candles[first].high
+                    neckline = min(c.low for c in candles[first : second + 1])
+                    height = first_high - neckline
+                    if height <= 0 or second_high > first_high + buffer:
+                        continue
+                    retest = (second_high - neckline) / height
+                    if retest < self.min_retest:
+                        continue
+                    recently_above = any(
+                        c.close >= neckline
+                        for c in candles[-2 - self.strength : -1]
+                    )
+                    broke = (
+                        price < neckline and recently_above
+                        and neckline - price <= height * 0.3
+                    )
+                    if broke:
+                        return Signal(
+                            action=SignalAction.ENTER_SHORT,
+                            strength=_retest_conviction(retest),
+                            stop_loss=second_high + buffer,
+                            take_profit=neckline - height,
+                            reason=f"쌍봉 넥라인 이탈 (되돌림 {retest:.0%}, 목표 -{height:.6g})",
+                        )
+                    break
+        return Signal(reason="패턴 없음")
+
+
+def _retest_conviction(retest: float) -> float:
+    """되돌림이 깊을수록(1.0 = 같은 레벨 쌍바닥) 확신을 올린다."""
+    if retest >= 0.8:
+        return Conviction.VERY_HIGH.value
+    if retest >= 0.6:
+        return Conviction.HIGH.value
+    if retest >= 0.45:
+        return Conviction.MEDIUM.value
+    return Conviction.LOW.value
+
+
+@register_strategy("macd_divergence")
+class MacdDivergenceStrategy(Strategy):
+    summary = "가격은 저점을 낮췄는데 MACD 히스토그램은 높였으면 매수"
+    category = "reversion"
+    description = """
+rsi_divergence 와 같은 발상을 MACD 히스토그램으로 잰 변형이다. 가격이 신저가를
+만드는데 히스토그램의 골이 얕아지고 있으면, 하락을 미는 모멘텀이 줄고 있다는
+뜻이다 — 브레이크를 밟은 채 내려가는 차와 같다.
+
+RSI 판과의 차이: RSI 는 0~100 으로 정규화된 강도라 극단에서 뭉개지지만(포화),
+히스토그램은 정규화가 없어 **모멘텀의 절대 크기 감소**가 그대로 보인다. 급락
+후의 다이버전스에서는 포화가 없는 MACD 쪽이 더 정직하다는 것이 통설이다. 두
+다이버전스 전략을 순위표에서 비교하면 어느 자가 이 시장에 맞는지 드러난다.
+
+구현은 rsi_divergence 와 같은 프랙탈 피봇 방식이다 — 최근 두 스윙 저점에서
+가격은 낮아지고 히스토그램은 높아졌으면(덜 깊은 골) 강세 다이버전스.
+
+**강점**: 모멘텀 포화가 없어 깊은 급락에서도 격차가 읽힌다.
+**약점**: 히스토그램 스케일이 심볼·시기마다 달라 격차의 절대 기준을 정할 수
+없다 — 확신도는 상대 비교로만 잰다. 다이버전스 공통의 조기 진입 위험도 그대로다.
+"""
+    algorithm = """
+**지표**  MACD(12, 26, 9) 히스토그램, 프랙탈 피봇(좌우 3봉), ATR(14)
+
+**다이버전스** (강세 기준)
+- 최근 두 스윙 저점: 가격 저점 낮아짐, 같은 자리 히스토그램은 높아짐(덜 깊음)
+- 두 번째 저점의 히스토그램 < 0 (하락 맥락에서만)
+- 두 번째 피봇 확정 후 5봉 이내
+
+**진입**  다이버전스 확인 봉. 약세는 거울상.
+
+**청산**  히스토그램이 0선을 넘으면(모멘텀 회복 완료) 청산.
+
+**손절**  두 번째 저점 − ATR × 0.25.
+
+**확신도**  히스토그램 개선 비율 (두 골의 깊이 비)
+- 격차 ≥ 50% 개선 → VERY_HIGH · ≥ 30% → HIGH · ≥ 10% → MEDIUM · 그 외 LOW
+
+**파라미터**  `fast`, `slow`, `signal`, `strength`, `freshness`
+"""
+
+    def setup(self) -> None:
+        self.fast = int(self.params.get("fast", 12))
+        self.slow = int(self.params.get("slow", 26))
+        self.signal_period = int(self.params.get("signal", 9))
+        self.strength = int(self.params.get("strength", 3))
+        self.freshness = int(self.params.get("freshness", 5))
+
+    @property
+    def warmup_candles(self) -> int:
+        return self.slow + self.signal_period + 40
+
+    def generate(self, ctx: StrategyContext) -> Signal:
+        candles = ctx.closed_candles
+        if len(candles) < self.warmup_candles:
+            return Signal(reason="워밍업 부족")
+
+        from bot.indicators import macd
+        _, _, histogram = macd([c.close for c in candles],
+                               self.fast, self.slow, self.signal_period)
+        atr_values = atr(candles, 14)
+        if histogram[-1] is None or atr_values[-1] is None:
+            return Signal(reason="지표 계산 불가")
+
+        price = candles[-1].close
+        if ctx.position.side is PositionSide.LONG and histogram[-1] >= 0:
+            return Signal(action=SignalAction.EXIT, reason="모멘텀 회복 완료")
+        if ctx.position.side is PositionSide.SHORT and histogram[-1] <= 0:
+            return Signal(action=SignalAction.EXIT, reason="모멘텀 회복 완료")
+        if ctx.position.is_open:
+            return Signal(reason="반전 진행 대기")
+
+        lows = pivot_lows(candles, self.strength)
+        highs = pivot_highs(candles, self.strength)
+
+        if len(lows) >= 2 and histogram[lows[-1]] is not None and histogram[lows[-2]] is not None:
+            fresh = len(candles) - 1 - lows[-1] <= self.strength + self.freshness
+            price_lower = candles[lows[-1]].low < candles[lows[-2]].low
+            hist_now, hist_before = histogram[lows[-1]], histogram[lows[-2]]
+            improving = hist_now > hist_before and hist_now < 0
+            if fresh and price_lower and improving:
+                improvement = (
+                    (hist_now - hist_before) / abs(hist_before) if hist_before != 0 else 0.0
+                )
+                return Signal(
+                    action=SignalAction.ENTER_LONG,
+                    strength=_improvement_conviction(improvement),
+                    stop_loss=candles[lows[-1]].low - atr_values[-1] * 0.25,
+                    reason=f"MACD 강세 다이버전스 (골 {improvement:.0%} 개선)",
+                )
+        if len(highs) >= 2 and histogram[highs[-1]] is not None and histogram[highs[-2]] is not None:
+            fresh = len(candles) - 1 - highs[-1] <= self.strength + self.freshness
+            price_higher = candles[highs[-1]].high > candles[highs[-2]].high
+            hist_now, hist_before = histogram[highs[-1]], histogram[highs[-2]]
+            fading = hist_now < hist_before and hist_now > 0
+            if fresh and price_higher and fading:
+                improvement = (
+                    (hist_before - hist_now) / abs(hist_before) if hist_before != 0 else 0.0
+                )
+                return Signal(
+                    action=SignalAction.ENTER_SHORT,
+                    strength=_improvement_conviction(improvement),
+                    stop_loss=candles[highs[-1]].high + atr_values[-1] * 0.25,
+                    reason=f"MACD 약세 다이버전스 (봉우리 {improvement:.0%} 감소)",
+                )
+        return Signal(reason="다이버전스 없음")
+
+
+def _improvement_conviction(improvement: float) -> float:
+    if improvement >= 0.5:
+        return Conviction.VERY_HIGH.value
+    if improvement >= 0.3:
+        return Conviction.HIGH.value
+    if improvement >= 0.1:
+        return Conviction.MEDIUM.value
+    return Conviction.LOW.value

@@ -219,9 +219,122 @@ class VolumeClimaxStrategy(Strategy):
         if sell_climax:
             return Signal(action=SignalAction.ENTER_LONG, strength=conviction,
                           stop_loss=c.low - atr_values[-1] * 0.1,
+                          take_profit=baseline[-1],   # 되돌림 목표 = SMA20
                           reason=f"매도 클라이맥스 ({volume_note}, 범위 {span / atr_values[-1]:.1f} ATR)")
         if buy_climax:
             return Signal(action=SignalAction.ENTER_SHORT, strength=conviction,
                           stop_loss=c.high + atr_values[-1] * 0.1,
+                          take_profit=baseline[-1],
                           reason=f"매수 클라이맥스 ({volume_note}, 범위 {span / atr_values[-1]:.1f} ATR)")
         return Signal(reason="폭증 봉이나 꼬리 미확인")
+
+
+@register_strategy("streak_reversion")
+class StreakReversionStrategy(Strategy):
+    summary = "7봉 연속 상승 같은 극단적 연속에 반대로 진입"
+    category = "reversion"
+    description = """
+동전을 일곱 번 던져 일곱 번 다 앞면이 나올 확률은 1% 미만이다. 가격이 7봉 연속
+같은 방향으로 닫히는 것도 무작위로는 드문 일이라, 그런 연속(streak)의 끝은
+통계적으로 되돌림 쪽에 무게가 실린다 — 래리 코너스 계열의 단기 평균회귀가 이
+성질을 쓴다. 연속 매수세는 어느 순간 소진되고, 마지막에 산 사람들의 익절 물량이
+되돌림을 만든다.
+
+규칙은 극단적으로 단순하다: 종가가 7봉 연속 오르면 숏, 7봉 연속 내리면 롱.
+연속이 길수록(8봉, 9봉...) 확신을 올린다. 목표는 과욕 없이 SMA(10) 복귀까지만
+— 그 가격을 익절가로 건다.
+
+주의: 강한 추세장에서 연속은 10봉, 15봉도 간다. 이 전략이 "연속이 극단적이니
+곧 꺾인다"에 거는 동안 추세추종 전략들은 그 연속을 타고 있다 — 순위표에서
+three_soldiers(3연속에 순방향)와 정확히 반대편에 서는 짝이다.
+
+**강점**: 규칙이 지표조차 없이 투명하다. 통계적 근거가 명료하다.
+**약점**: 추세장에서 연속 손절이 쌓인다. '드문 일'은 추세장에서는 드물지 않다.
+"""
+    algorithm = """
+**지표**  종가의 연속 방향 카운트, SMA(10), ATR(14)
+
+**진입**
+- 숏: 종가가 7봉 연속 상승 (각 봉 종가 > 직전 종가)
+- 롱: 종가가 7봉 연속 하락
+- 직전 봉에서 이미 조건을 채웠으면 건너뛴다 (연속 8, 9봉에 재진입하지 않음 —
+  대신 그만큼 길어진 연속은 다음 진입의 확신도를 올린다)
+
+**청산**  SMA(10) 도달 — 진입 시 **익절가**로 걸어 둔다.
+
+**손절**  진입가 ∓ (ATR14 × 1.5)
+
+**확신도**  연속 길이
+- ≥ 10봉 → VERY_HIGH · ≥ 9봉 → HIGH · ≥ 8봉 → MEDIUM · 7봉 → LOW
+
+**파라미터**  `streak`(기본 7), `exit_period`(기본 10), `atr_multiplier`
+"""
+
+    def setup(self) -> None:
+        self.streak = int(self.params.get("streak", 7))
+        self.exit_period = int(self.params.get("exit_period", 10))
+        self.atr_multiplier = float(self.params.get("atr_multiplier", 1.5))
+
+    @property
+    def warmup_candles(self) -> int:
+        return self.streak + self.exit_period + 20
+
+    @staticmethod
+    def _streak_length(closes) -> int:
+        """마지막 봉 기준 연속 방향 길이. 양수 = 연속 상승, 음수 = 연속 하락."""
+        length = 0
+        for i in range(len(closes) - 1, 0, -1):
+            if closes[i] > closes[i - 1]:
+                if length < 0:
+                    break
+                length += 1
+            elif closes[i] < closes[i - 1]:
+                if length > 0:
+                    break
+                length -= 1
+            else:
+                break
+        return length
+
+    def generate(self, ctx: StrategyContext) -> Signal:
+        candles = ctx.closed_candles
+        if len(candles) < self.warmup_candles:
+            return Signal(reason="워밍업 부족")
+
+        closes = [c.close for c in candles]
+        baseline = sma(closes, self.exit_period)
+        atr_values = atr(candles, 14)
+        if baseline[-1] is None or atr_values[-1] is None:
+            return Signal(reason="지표 계산 불가")
+        price = closes[-1]
+
+        if ctx.position.side is PositionSide.LONG and price >= baseline[-1]:
+            return Signal(action=SignalAction.EXIT, reason="SMA10 복귀")
+        if ctx.position.side is PositionSide.SHORT and price <= baseline[-1]:
+            return Signal(action=SignalAction.EXIT, reason="SMA10 복귀")
+        if ctx.position.is_open:
+            return Signal(reason="되돌림 대기")
+
+        streak = self._streak_length(closes)
+        streak_prev = self._streak_length(closes[:-1])
+        magnitude = abs(streak)
+        if magnitude < self.streak or abs(streak_prev) >= self.streak:
+            return Signal(reason=f"연속 {streak:+d}봉")
+
+        conviction = (
+            Conviction.VERY_HIGH.value if magnitude >= self.streak + 3
+            else Conviction.HIGH.value if magnitude >= self.streak + 2
+            else Conviction.MEDIUM.value if magnitude >= self.streak + 1
+            else Conviction.LOW.value
+        )
+        if streak > 0:
+            return Signal(action=SignalAction.ENTER_SHORT, strength=conviction,
+                          stop_loss=_atr_stop(candles, len(candles) - 1, price,
+                                              PositionSide.SHORT, self.atr_multiplier),
+                          take_profit=baseline[-1],
+                          reason=f"{magnitude}봉 연속 상승 — 소진 베팅")
+        return Signal(action=SignalAction.ENTER_LONG, strength=conviction,
+                      stop_loss=_atr_stop(candles, len(candles) - 1, price,
+                                          PositionSide.LONG, self.atr_multiplier),
+                      take_profit=baseline[-1],
+                      reason=f"{magnitude}봉 연속 하락 — 소진 베팅")

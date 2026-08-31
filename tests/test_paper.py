@@ -407,3 +407,46 @@ def test_funding_survives_a_restart():
     restored = revived._positions[("s", SYMBOL)]
     assert restored.funding_paid == pytest.approx(position.funding_paid)
     assert restored.next_funding_ms == position.next_funding_ms
+
+
+# --- 익절 -----------------------------------------------------------------
+def test_take_profit_closes_at_the_target_price():
+    """전략이 준 익절가에 닿으면 그 가격으로 체결되어야 한다."""
+    tp_long = Signal(action=SignalAction.ENTER_LONG, strength=0.5,
+                     take_profit=105.0, reason="테스트")
+    strategy = Scripted("tp", [tp_long, HOLD, HOLD])
+    arena = arena_with({"tp": strategy})
+
+    arena.step(SYMBOL, bars(100.0), tick(100.0))                  # 진입
+    arena.step(SYMBOL, bars(104.0, high=106.0), tick(104.0))      # 고가가 익절가를 스침
+
+    trades = arena.store.paper_trades("tp")
+    assert len(trades) == 1
+    assert trades[0]["exit_reason"] == "target"
+    assert trades[0]["exit_price"] == pytest.approx(105.0)
+
+
+def test_stop_wins_when_stop_and_target_collide_in_one_bar():
+    """같은 봉에서 손절과 익절이 둘 다 스쳤으면 불리한 쪽(손절)을 가정한다."""
+    both = Signal(action=SignalAction.ENTER_LONG, strength=0.5,
+                  stop_loss=98.0, take_profit=102.0, reason="테스트")
+    strategy = Scripted("collide", [both, HOLD])
+    arena = arena_with({"collide": strategy})
+
+    arena.step(SYMBOL, bars(100.0), tick(100.0))
+    arena.step(SYMBOL, bars(100.0, low=97.0, high=103.0), tick(100.0))
+
+    trades = arena.store.paper_trades("collide")
+    assert len(trades) == 1
+    assert trades[0]["exit_reason"] == "stop"
+
+
+def test_no_take_profit_means_no_cap():
+    """익절가를 주지 않은 전략은 수익률 제한 없이 달린다."""
+    strategy = Scripted("runner", [LONG, HOLD, HOLD])
+    arena = arena_with({"runner": strategy})
+
+    arena.step(SYMBOL, bars(100.0), tick(100.0))
+    arena.step(SYMBOL, bars(150.0, high=200.0), tick(150.0))
+
+    assert arena.store.paper_trades("runner") == []   # 아직 보유 중

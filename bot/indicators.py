@@ -358,6 +358,33 @@ def adx(candles: list[Candle], period: int = 14) -> tuple[Series, Series, Series
     return plus_di, minus_di, adx_out
 
 
+def vortex(candles: list[Candle], period: int = 14) -> tuple[Series, Series]:
+    """볼텍스 지표 (VI+, VI−).
+
+    VI+ 는 이번 고가와 직전 저가의 거리(상승 소용돌이), VI− 는 이번 저가와
+    직전 고가의 거리(하락 소용돌이)를 진폭 합으로 나눈 값이다. 두 선의 교차가
+    추세 전환 신호로 쓰인다 — DI 교차보다 평활이 덜해 반응이 빠르다.
+    """
+    n = len(candles)
+    plus: Series = [None] * n
+    minus: Series = [None] * n
+    if n <= period:
+        return plus, minus
+    ranges = true_range(candles)
+    vm_plus = [0.0] * n
+    vm_minus = [0.0] * n
+    for i in range(1, n):
+        vm_plus[i] = abs(candles[i].high - candles[i - 1].low)
+        vm_minus[i] = abs(candles[i].low - candles[i - 1].high)
+    for i in range(period, n):
+        tr_sum = sum(ranges[j] for j in range(i - period + 1, i + 1))
+        if tr_sum <= 0:
+            continue
+        plus[i] = sum(vm_plus[i - period + 1 : i + 1]) / tr_sum
+        minus[i] = sum(vm_minus[i - period + 1 : i + 1]) / tr_sum
+    return plus, minus
+
+
 def keltner(
     candles: list[Candle], period: int = 20, atr_period: int = 10, multiplier: float = 2.0
 ) -> tuple[Series, Series, Series]:

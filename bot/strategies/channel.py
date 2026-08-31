@@ -304,10 +304,12 @@ grid 전략과 발상이 비슷하지만 기준선(EMA vs VWAP)과 이격의 자
             return Signal(action=SignalAction.ENTER_LONG, strength=conviction,
                           stop_loss=_atr_stop(candles, len(candles) - 1, price,
                                               PositionSide.LONG, self.atr_multiplier),
+                          take_profit=vwap[-1],   # VWAP 복귀가 목표다
                           reason=f"VWAP 하방 이격 (z {z:+.2f})")
         return Signal(action=SignalAction.ENTER_SHORT, strength=conviction,
                       stop_loss=_atr_stop(candles, len(candles) - 1, price,
                                           PositionSide.SHORT, self.atr_multiplier),
+                      take_profit=vwap[-1],
                       reason=f"VWAP 상방 이격 (z {z:+.2f})")
 
 
@@ -395,12 +397,224 @@ class RangeFadeStrategy(Strategy):
             else Conviction.LOW.value
         )
         buffer = atr_values[-1] * self.atr_buffer
+        middle_price = low + span * 0.5
         if position_pct <= self.edge:
             return Signal(action=SignalAction.ENTER_LONG, strength=conviction,
                           stop_loss=low - buffer,
+                          take_profit=middle_price,   # 박스 중간 복귀가 목표다
                           reason=f"박스 바닥권 (위치 {position_pct:.0%}, 폭 {width_pct:.1f}%)")
         if position_pct >= 1 - self.edge:
             return Signal(action=SignalAction.ENTER_SHORT, strength=conviction,
                           stop_loss=high + buffer,
+                          take_profit=middle_price,
                           reason=f"박스 천장권 (위치 {position_pct:.0%}, 폭 {width_pct:.1f}%)")
         return Signal(reason=f"박스 중간 (위치 {position_pct:.0%})")
+
+
+@register_strategy("keltner_reversion")
+class KeltnerReversionStrategy(Strategy):
+    summary = "켈트너 채널 밖으로 나갔다 돌아오는 가격을 잡아 중심선까지 먹는다"
+    category = "reversion"
+    description = """
+keltner_breakout 의 거울상이다 — 같은 채널(EMA20 ± ATR×2)을 정반대로 해석한다.
+그쪽은 밴드 이탈을 추세의 시작으로 보고 따라가지만, 이쪽은 일시적 과열로 보고
+가격이 **밴드 안으로 복귀하는 순간** 반대로 진입해 중심선(EMA20)까지의 되돌림을
+노린다. bollinger_breakout ↔ bollinger_reversion 짝의 켈트너판이다.
+
+볼린저 회귀와의 차이는 '자'다 — 볼린저 밴드는 표준편차라 급등락 한 방에 확
+부풀어 복귀 신호가 헐거워지지만, 켈트너 밴드는 ATR 기반이라 완만하게 반응해
+복귀 판정이 안정적이다. 대신 변동성 국면 전환은 늦게 반영한다.
+
+진입 시 중심선을 익절가로 함께 건다 — 되돌림의 목표가 논리에 내장되어 있으므로
+그 가격에 지정가 익절이 걸리는 것이 자연스럽다.
+
+**강점**: 복귀 판정이 볼린저보다 덜 출렁인다. 목표가가 명확하다.
+**약점**: 평균회귀 공통 — 추세 초입의 복귀 신호는 눌림이 아니라 추세의 시작을
+거스르는 것이다.
+"""
+    algorithm = """
+**지표**  켈트너 채널(EMA20, ATR10 × 2.0), ATR(14)
+
+**진입**  밴드를 벗어났다가 **다시 안으로 들어올 때**.
+- 롱: 직전 종가 < 하단 밴드 이고 이번 종가 ≥ 하단 밴드
+- 숏: 직전 종가 > 상단 밴드 이고 이번 종가 ≤ 상단 밴드
+
+**청산**  중심선(EMA20) 도달. 진입 시 중심선을 **익절가**로도 걸어 둔다.
+
+**손절**  진입가 ∓ (ATR14 × 1.5)
+
+**확신도**  밴드를 벗어났던 깊이 ÷ ATR
+- ≥ 1.0 → VERY_HIGH · ≥ 0.6 → HIGH · ≥ 0.3 → MEDIUM · 그 외 LOW
+
+**파라미터**  `period`, `atr_period`, `multiplier`, `atr_multiplier`
+"""
+
+    def setup(self) -> None:
+        self.period = int(self.params.get("period", 20))
+        self.atr_period = int(self.params.get("atr_period", 10))
+        self.multiplier = float(self.params.get("multiplier", 2.0))
+        self.atr_multiplier = float(self.params.get("atr_multiplier", 1.5))
+
+    @property
+    def warmup_candles(self) -> int:
+        return max(self.period, self.atr_period) + 20
+
+    def generate(self, ctx: StrategyContext) -> Signal:
+        candles = ctx.closed_candles
+        if len(candles) < self.warmup_candles:
+            return Signal(reason="워밍업 부족")
+
+        upper, middle, lower = keltner(candles, self.period, self.atr_period, self.multiplier)
+        atr_values = atr(candles, 14)
+        if (upper[-1] is None or middle[-1] is None or upper[-2] is None
+                or atr_values[-1] is None or atr_values[-1] == 0):
+            return Signal(reason="지표 계산 불가")
+
+        closes = [c.close for c in candles]
+        price, previous = closes[-1], closes[-2]
+
+        if ctx.position.side is PositionSide.LONG and price >= middle[-1]:
+            return Signal(action=SignalAction.EXIT, reason="중심선 도달")
+        if ctx.position.side is PositionSide.SHORT and price <= middle[-1]:
+            return Signal(action=SignalAction.EXIT, reason="중심선 도달")
+        if ctx.position.is_open:
+            return Signal(reason="중심선 복귀 대기")
+
+        if previous < lower[-2] <= price:
+            depth = (lower[-2] - previous) / atr_values[-1]
+            return Signal(action=SignalAction.ENTER_LONG,
+                          strength=_reentry_conviction(depth),
+                          stop_loss=_atr_stop(candles, len(candles) - 1, price,
+                                              PositionSide.LONG, self.atr_multiplier),
+                          take_profit=middle[-1],
+                          reason=f"켈트너 하단 복귀 (깊이 {depth:.1f} ATR)")
+        if previous > upper[-2] >= price:
+            depth = (previous - upper[-2]) / atr_values[-1]
+            return Signal(action=SignalAction.ENTER_SHORT,
+                          strength=_reentry_conviction(depth),
+                          stop_loss=_atr_stop(candles, len(candles) - 1, price,
+                                              PositionSide.SHORT, self.atr_multiplier),
+                          take_profit=middle[-1],
+                          reason=f"켈트너 상단 복귀 (깊이 {depth:.1f} ATR)")
+        return Signal(reason="밴드 안")
+
+
+def _reentry_conviction(depth_atr: float) -> float:
+    if depth_atr >= 1.0:
+        return Conviction.VERY_HIGH.value
+    if depth_atr >= 0.6:
+        return Conviction.HIGH.value
+    if depth_atr >= 0.3:
+        return Conviction.MEDIUM.value
+    return Conviction.LOW.value
+
+
+@register_strategy("donchian_pullback")
+class DonchianPullbackStrategy(Strategy):
+    summary = "채널 상단을 만든 추세가 중간선까지 눌리면 사서 상단을 다시 노린다"
+    category = "combo"
+    description = """
+터틀(donchian_breakout)이 채널 끝의 돌파를 사서 자주 물리는 것과 달리, 이쪽은
+**돌파가 이미 확인된 추세의 눌림**을 산다. 최근 40봉 채널의 상단이 얼마 전에
+갱신됐고(추세 존재의 증거), 가격이 채널 중간선까지 눌렸다가 다시 위로 도는 봉—
+그 지점이 진입가다. 목표는 채널 상단 재도전이고, 그 가격을 익절가로 건다.
+
+돌파 추격과 눌림 매수의 손익 구조 차이가 이 전략의 요점이다: 같은 추세를 먹어도
+돌파 추격은 '채널 상단에서 사서 더 오르기를 기대'하고, 눌림 매수는 '중간에서
+사서 상단까지만 기대'한다. 후자는 목표가 가까워 승률이 높은 대신 큰 추세 연장을
+포기한다. donchian_breakout 과 순위표에서 비교하라고 만든 짝이다.
+
+**강점**: 진입가가 유리하고 목표(채널 상단)가 구조적으로 내장된다.
+**약점**: 강한 추세는 중간선까지 눌러 주지 않는다 — 기회가 드물다. 채널 자체가
+꺾이는 중의 눌림은 눌림이 아니라 하락의 시작이다.
+"""
+    algorithm = """
+**지표**  돈치안 채널(40봉, 직전 봉까지), ATR(14)
+
+**추세 확인**  최근 15봉 안에 채널 상단(롱) / 하단(숏) 갱신이 있었다.
+
+**진입** (롱 기준, 숏은 거울상)
+- 추세 확인 + 채널 상단에서 ATR × 1.5 이상 눌렸고, 아직 중간선 위이며,
+  이번 봉이 직전 봉보다 회복(턴)했다
+
+**청산**  채널 상단(롱) 도달 — 진입 시 **익절가**로 걸어 둔다. 중간선까지
+밀리면 눌림이 아니었던 것 — 신호 청산.
+
+**손절**  진입가 ∓ (ATR14 × 1.5)
+
+**확신도**  채널 폭 ÷ ATR (넓은 채널의 중간 복귀일수록 목표까지의 거리가 값지다)
+- ≥ 8 → VERY_HIGH · ≥ 5 → HIGH · ≥ 3 → MEDIUM · 그 외 LOW
+
+**파라미터**  `period`, `recent`(기본 15), `dip_atr`(기본 1.5), `atr_multiplier`
+"""
+
+    def setup(self) -> None:
+        self.period = int(self.params.get("period", 40))
+        self.recent = int(self.params.get("recent", 15))
+        self.dip_atr = float(self.params.get("dip_atr", 1.5))
+        self.atr_multiplier = float(self.params.get("atr_multiplier", 1.5))
+
+    @property
+    def warmup_candles(self) -> int:
+        return self.period + self.recent + 20
+
+    def generate(self, ctx: StrategyContext) -> Signal:
+        candles = ctx.closed_candles
+        if len(candles) < self.warmup_candles:
+            return Signal(reason="워밍업 부족")
+
+        highs, lows = donchian(candles, self.period)
+        atr_values = atr(candles, 14)
+        if highs[-1] is None or lows[-1] is None or atr_values[-1] is None:
+            return Signal(reason="지표 계산 불가")
+
+        high, low = highs[-1], lows[-1]
+        span = high - low
+        if span <= 0 or atr_values[-1] == 0:
+            return Signal(reason="범위 없음")
+        middle = low + span * 0.5
+        closes = [c.close for c in candles]
+        price, previous = closes[-1], closes[-2]
+
+        if ctx.position.side is PositionSide.LONG and price < middle:
+            return Signal(action=SignalAction.EXIT, reason="중간선 이탈 — 눌림이 아니었다")
+        if ctx.position.side is PositionSide.SHORT and price > middle:
+            return Signal(action=SignalAction.EXIT, reason="중간선 돌파 — 반등이 아니었다")
+        if ctx.position.is_open:
+            return Signal(reason="채널 끝 재도전 대기")
+
+        # 최근에 채널 끝이 갱신됐는가 — 추세가 실존한다는 증거.
+        made_high = any(
+            highs[i] is not None and candles[i].high > highs[i]
+            for i in range(len(candles) - self.recent, len(candles))
+        )
+        made_low = any(
+            lows[i] is not None and candles[i].low < lows[i]
+            for i in range(len(candles) - self.recent, len(candles))
+        )
+
+        width_atr = span / atr_values[-1]
+        conviction = (
+            Conviction.VERY_HIGH.value if width_atr >= 8
+            else Conviction.HIGH.value if width_atr >= 5
+            else Conviction.MEDIUM.value if width_atr >= 3
+            else Conviction.LOW.value
+        )
+        # 눌림 = 채널 끝에서 ATR 배수만큼 물러난 상태. 턴 = 직전 봉보다 회복.
+        dip = (high - price) / atr_values[-1]
+        bounce = (price - low) / atr_values[-1]
+        turned_up = price > previous
+        turned_down = price < previous
+        if made_high and dip >= self.dip_atr and price > middle and turned_up:
+            return Signal(action=SignalAction.ENTER_LONG, strength=conviction,
+                          stop_loss=_atr_stop(candles, len(candles) - 1, price,
+                                              PositionSide.LONG, self.atr_multiplier),
+                          take_profit=high,
+                          reason=f"추세 눌림 {dip:.1f} ATR 반등 (목표 상단 {high:.6g})")
+        if made_low and bounce >= self.dip_atr and price < middle and turned_down:
+            return Signal(action=SignalAction.ENTER_SHORT, strength=conviction,
+                          stop_loss=_atr_stop(candles, len(candles) - 1, price,
+                                              PositionSide.SHORT, self.atr_multiplier),
+                          take_profit=low,
+                          reason=f"반등 {bounce:.1f} ATR 소진 (목표 하단 {low:.6g})")
+        return Signal(reason="눌림 대기")

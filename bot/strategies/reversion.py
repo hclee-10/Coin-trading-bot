@@ -141,7 +141,8 @@ class BollingerReversionStrategy(Strategy):
 - 롱: 직전 종가 < 하단 밴드 이고 이번 종가 ≥ 하단 밴드
 - 숏: 직전 종가 > 상단 밴드 이고 이번 종가 ≤ 상단 밴드
 
-**청산**  중심선(SMA20)에 도달하면 청산.
+**청산**  중심선(SMA20)에 도달하면 청산. 진입 시 중심선을 **익절가**로도
+걸어 두므로, 폴링 사이에 스쳐도 그 가격에 체결된다.
 
 **손절**  진입가 ∓ (ATR14 × 1.5)
 
@@ -186,6 +187,7 @@ class BollingerReversionStrategy(Strategy):
                 strength=_gap_band_conviction(depth(lower[-2], previous)),
                 stop_loss=_atr_stop(candles, len(candles) - 1, price,
                                     PositionSide.LONG, self.atr_multiplier),
+                take_profit=middle[-1],   # 되돌림의 목표 = 중심선
                 reason="하단 밴드 복귀",
             )
         if previous > upper[-2] >= price:
@@ -194,6 +196,7 @@ class BollingerReversionStrategy(Strategy):
                 strength=_gap_band_conviction(depth(upper[-2], previous)),
                 stop_loss=_atr_stop(candles, len(candles) - 1, price,
                                     PositionSide.SHORT, self.atr_multiplier),
+                take_profit=middle[-1],
                 reason="상단 밴드 복귀",
             )
         return Signal(reason="밴드 안")
@@ -292,7 +295,9 @@ class GridStrategy(Strategy):
         if deviation < 0:
             return Signal(action=SignalAction.ENTER_LONG, strength=conviction,
                           stop_loss=price * (1 - self.stop_pct / 100),
+                          take_profit=baseline[-1],   # 기준선 복귀가 목표다
                           reason=f"기준선 아래 {deviation:.2f}%")
         return Signal(action=SignalAction.ENTER_SHORT, strength=conviction,
                       stop_loss=price * (1 + self.stop_pct / 100),
+                      take_profit=baseline[-1],
                       reason=f"기준선 위 +{deviation:.2f}%")

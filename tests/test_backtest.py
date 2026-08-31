@@ -338,3 +338,47 @@ def test_funding_can_be_turned_off():
 
     assert result.total_funding == 0.0
     assert result.trades[0].pnl == pytest.approx(0.0)
+
+
+class LongWithTarget(Strategy):
+    name = "long_with_target"
+
+    def generate(self, ctx):
+        if ctx.position.is_open:
+            return Signal(action=SignalAction.HOLD)
+        price = ctx.last_price
+        return Signal(action=SignalAction.ENTER_LONG, strength=1.0,
+                      stop_loss=price * 0.9, take_profit=price * 1.03)
+
+
+def test_take_profit_fills_at_the_target():
+    """익절가를 지나간 봉에서 그 가격으로 체결되고, maker 수수료가 적용된다."""
+    closes = [100.0] * 10 + [101.0, 102.0, 104.0, 104.0, 104.0]
+    result = run_backtest(bars(closes, spread=0.2), LongWithTarget(), make_config())
+
+    targets = [t for t in result.trades if t.exit_reason == "target"]
+    assert targets, "익절 체결이 한 번도 없습니다"
+    assert targets[0].exit_price == pytest.approx(targets[0].entry_price * 1.03, rel=1e-3)
+
+
+def test_stop_beats_target_in_the_same_bar():
+    """한 봉에서 손절과 익절이 겹치면 손절이 먼저다 — 불리한 가정."""
+
+    class TightBoth(Strategy):
+        name = "tight_both"
+
+        def generate(self, ctx):
+            if ctx.position.is_open:
+                return Signal(action=SignalAction.HOLD)
+            price = ctx.last_price
+            return Signal(action=SignalAction.ENTER_LONG, strength=1.0,
+                          stop_loss=price * 0.99, take_profit=price * 1.01)
+
+    closes = [100.0] * 10 + [100.0] * 5
+    candles = bars(closes, spread=3.0)   # 모든 봉이 손절·익절 둘 다 스친다
+    result = run_backtest(candles, TightBoth(), make_config())
+
+    stops = [t for t in result.trades if t.exit_reason == "stop"]
+    targets = [t for t in result.trades if t.exit_reason == "target"]
+    assert stops, "손절 체결이 없습니다"
+    assert not targets, "손절과 겹친 봉에서 익절이 먼저 체결됐습니다"

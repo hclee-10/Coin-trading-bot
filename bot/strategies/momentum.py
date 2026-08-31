@@ -561,3 +561,90 @@ ema_cross 같은 순수 추세추종과 순위표에서 비교하면 "횡보 필
         if crossed_up or crossed_down:
             return Signal(reason=f"DI 교차했으나 ADX {strength[-1]:.0f} < {self.adx_threshold:.0f} (횡보)")
         return Signal(reason="교차 없음")
+
+
+@register_strategy("vortex_cross")
+class VortexCrossStrategy(Strategy):
+    summary = "볼텍스 VI+/VI−가 교차하면 진입 — DI보다 빠른 방향 전환 감지"
+    category = "trend"
+    description = """
+볼텍스 지표는 "상승 소용돌이"와 "하락 소용돌이"의 세기를 잰다 — VI+ 는 이번
+고가가 직전 저가에서 얼마나 뻗었는지, VI− 는 이번 저가가 직전 고가에서 얼마나
+꽂혔는지의 누적이다. 봉과 봉 사이의 **교차 움직임**을 직접 재기 때문에, 같은
+방향 지표인 +DI/−DI 보다 평활이 덜하고 반응이 빠르다.
+
+진입은 두 선의 교차다. adx_trend 가 DI 교차에 ADX 필터를 얹어 늦고 확실한
+신호를 고르는 것과 달리, 이쪽은 필터 없이 교차를 그대로 받아 빠르고 잦다 —
+같은 '방향성' 계열 안에서 빠름(볼텍스)과 확실함(ADX 필터)의 짝 비교다.
+
+확신도는 교차 순간 두 선의 벌어진 정도. 살짝 스친 교차보다 확실히 벌어진
+교차가 이어질 가능성이 높다.
+
+**강점**: 방향 전환을 DI 계열 중 가장 빨리 잡는다. 계산이 투명하다.
+**약점**: 평활이 덜한 만큼 횡보에서 교차가 잦다. 필터가 없는 것이 설계지만,
+그만큼 톱니 손실도 그대로 받는다.
+"""
+    algorithm = """
+**지표**  볼텍스(14), ATR(14)
+
+**진입**
+- 롱: VI+ 가 VI− 를 상향 교차 (직전 봉 ≤, 이번 봉 >)
+- 숏: 하향 교차
+
+**청산**  반대 교차가 나오면 청산.
+
+**손절**  진입가 ∓ (ATR14 × 2.0)
+
+**확신도**  교차 직후 |VI+ − VI−|
+- ≥ 0.20 → VERY_HIGH · ≥ 0.12 → HIGH · ≥ 0.05 → MEDIUM · 그 외 LOW
+
+**파라미터**  `period`, `atr_multiplier`
+"""
+
+    def setup(self) -> None:
+        self.period = int(self.params.get("period", 14))
+        self.atr_multiplier = float(self.params.get("atr_multiplier", 2.0))
+
+    @property
+    def warmup_candles(self) -> int:
+        return self.period + 30
+
+    def generate(self, ctx: StrategyContext) -> Signal:
+        candles = ctx.closed_candles
+        if len(candles) < self.warmup_candles:
+            return Signal(reason="워밍업 부족")
+
+        from bot.indicators import vortex
+        plus, minus = vortex(candles, self.period)
+        if any(s[-1] is None or s[-2] is None for s in (plus, minus)):
+            return Signal(reason="지표 계산 불가")
+
+        crossed_up = plus[-2] <= minus[-2] and plus[-1] > minus[-1]
+        crossed_down = plus[-2] >= minus[-2] and plus[-1] < minus[-1]
+        price = candles[-1].close
+
+        if ctx.position.side is PositionSide.LONG and crossed_down:
+            return Signal(action=SignalAction.EXIT, reason="볼텍스 하향 교차")
+        if ctx.position.side is PositionSide.SHORT and crossed_up:
+            return Signal(action=SignalAction.EXIT, reason="볼텍스 상향 교차")
+        if ctx.position.is_open:
+            return Signal(reason="소용돌이 방향 유지")
+
+        gap = abs(plus[-1] - minus[-1])
+        conviction = (
+            Conviction.VERY_HIGH.value if gap >= 0.20
+            else Conviction.HIGH.value if gap >= 0.12
+            else Conviction.MEDIUM.value if gap >= 0.05
+            else Conviction.LOW.value
+        )
+        if crossed_up:
+            return Signal(action=SignalAction.ENTER_LONG, strength=conviction,
+                          stop_loss=_atr_stop(candles, len(candles) - 1, price,
+                                              PositionSide.LONG, self.atr_multiplier),
+                          reason=f"VI+ 상향 교차 (격차 {gap:.2f})")
+        if crossed_down:
+            return Signal(action=SignalAction.ENTER_SHORT, strength=conviction,
+                          stop_loss=_atr_stop(candles, len(candles) - 1, price,
+                                              PositionSide.SHORT, self.atr_multiplier),
+                          reason=f"VI− 하향 교차 (격차 {gap:.2f})")
+        return Signal(reason="교차 없음")
