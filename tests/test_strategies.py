@@ -410,3 +410,60 @@ def test_exit_signals_never_carry_a_size():
 
     if signal.action is SignalAction.EXIT:
         assert signal.stop_loss is None
+
+
+def test_dca_fades_the_spike_and_pyramids_without_selling():
+    """급락엔 롱 적립 시작, 보유 중 또 급락이면 pyramid 추가, 평단이 회복돼도 팔지 않는다."""
+    strategy = get_strategy("dca_atr", {"spike_atr": 2.0})
+    calm = [100.0 + (0.1 if i % 2 else -0.1) for i in range(60)]
+
+    crash = series(calm + [94.0, 94.0])
+    first = strategy.generate(context(crash))
+    assert first.action is SignalAction.ENTER_LONG
+    assert first.strength == Conviction.LOW.value      # 항상 회당 고정 금액
+
+    # 보유 중, 가라앉은 뒤의 새 급락 → 같은 방향 적립 + pyramid 메타데이터
+    crash2 = series(calm + [94.0] * 7 + [88.0, 88.0])
+    holding = Position(symbol=SYMBOL, side=PositionSide.LONG, contracts=1.0,
+                       entry_price=94.0, notional=100.0)
+    add = strategy.generate(context(crash2, holding))
+    assert add.action is SignalAction.ENTER_LONG
+    assert add.metadata.get("pyramid") is True
+
+    # 평단 위로 회복해도 매도하지 않는다 — 무매도 적립식이다.
+    recovered = series(calm + [94.0, 88.0, 96.0, 96.0])
+    averaged = Position(symbol=SYMBOL, side=PositionSide.LONG, contracts=2.0,
+                        entry_price=91.0, notional=200.0)
+    held = strategy.generate(context(recovered, averaged))
+    assert held.action is SignalAction.HOLD
+    assert "적립" in held.reason
+
+
+def test_dca_variants_disagree_on_what_a_spike_is():
+    """세 변형은 같은 시세에서 다른 급변을 본다 — 그래서 분리했다.
+
+    아주 조용한 장의 +0.9% 점프: 평소 변동폭 대비로는 큰 급변(ATR 기준 잡음)
+    이지만 고정 1.5% 자에는 못 미친다(퍼센트 기준 무시).
+    """
+    calm = [100.0 + (0.05 if i % 2 else -0.05) for i in range(60)]
+    jump = series(calm + [100.9, 100.9], wick=0.02)
+
+    atr_based = get_strategy("dca_atr")
+    pct_based = get_strategy("dca_pct")
+
+    assert atr_based.generate(context(jump)).action is SignalAction.ENTER_SHORT
+    assert not pct_based.generate(context(jump)).is_entry
+
+
+def test_dca_stops_adding_at_the_exposure_cap():
+    """적립 한도(자기자본 대비 노출)에 닿으면 더 사 모으지 않는다."""
+    strategy = get_strategy("dca_atr", {"max_exposure_pct": 30.0})
+    calm = [100.0 + (0.1 if i % 2 else -0.1) for i in range(60)]
+    crash2 = series(calm + [94.0] * 7 + [88.0, 88.0])
+    huge = Position(symbol=SYMBOL, side=PositionSide.LONG, contracts=40.0,
+                    entry_price=94.0, notional=3_800.0)   # 10,000 의 38%
+
+    signal = strategy.generate(context(crash2, huge, equity=10_000.0))
+
+    assert not signal.is_entry
+    assert "한도" in signal.reason

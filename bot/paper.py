@@ -320,6 +320,15 @@ class PaperArena:
                 # 방향이 뒤집혔다 — 닫고 새로 연다.
                 self._close(name, position, price, now_ms, "reverse")
                 self._open(name, symbol, signal, price, now_ms, equity)
+            elif (
+                signal.is_entry
+                and signal.target_side is position.side
+                and signal.metadata.get("pyramid")
+            ):
+                # 같은 방향 추가 진입(적립·물타기). 전략이 metadata 로 명시할
+                # 때만 허용한다 — 일반 전략의 중복 진입 신호가 적립이 되면
+                # 안 된다. 평균 단가와 수량이 합쳐진다.
+                self._add(name, position, signal, price, now_ms, equity)
             return
 
         if signal.is_entry:
@@ -428,6 +437,40 @@ class PaperArena:
         self._positions[(name, symbol)] = position
         # next_funding_ms 는 다음 주기의 _settle_funding 이 채운다. 방금 연
         # 포지션은 아직 정산 시각을 지나지 않았으므로 그래도 된다.
+        self._save_position(name, position)
+
+    def _add(
+        self,
+        name: str,
+        position: PaperPosition,
+        signal: Signal,
+        price: float,
+        now_ms: int,
+        equity: float,
+    ) -> None:
+        """보유 포지션에 같은 방향으로 수량을 더한다 (평균 단가 갱신).
+
+        손절가는 첫 진입 때 것을 유지한다 — 물타기가 손절까지 미루기 시작하면
+        전략이 의도한 마지막 안전판이 사라진다. 실거래 실행기는 추가 진입을
+        지원하지 않으므로 이 동작은 모의매매 전용이다.
+        """
+        decision = self.risk.evaluate_entry(
+            signal=signal, entry_price=price, equity=equity, open_positions=0
+        )
+        if not decision.approved:
+            return
+
+        add_amount = decision.base_amount
+        add_fee = decision.notional * self.taker_fee
+        total_amount = position.amount + add_amount
+        if total_amount <= 0:
+            return
+        position.entry_price = (
+            position.entry_price * position.amount + price * add_amount
+        ) / total_amount
+        position.amount = total_amount
+        position.notional += decision.notional
+        position.entry_fee += add_fee
         self._save_position(name, position)
 
     def _save_position(self, name: str, position: PaperPosition) -> None:

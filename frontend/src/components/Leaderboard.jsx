@@ -49,13 +49,39 @@ function riskClass(value) {
   return ''
 }
 
+function loadHideLosers() {
+  try {
+    return localStorage.getItem('leaderboard.hideLosers') === '1'
+  } catch {
+    return false
+  }
+}
+
 export default function Leaderboard({ data, catalog, onReset, busy, storage }) {
   const [expanded, setExpanded] = useState(null)
   const [confirming, setConfirming] = useState(false)
   const [typed, setTyped] = useState('')
+  // 거래는 했는데 이긴 적이 한 번도 없는 전략을 접는다. 거래 0건(아직 판단
+  // 불가)은 숨기지 않는다 — 실패한 것과 안 해 본 것은 다르다.
+  const [hideLosers, setHideLosers] = useState(loadHideLosers)
+
+  const toggleHideLosers = () => {
+    setHideLosers((current) => {
+      try {
+        localStorage.setItem('leaderboard.hideLosers', current ? '0' : '1')
+      } catch {
+        // 저장 실패는 무시 — 토글 자체는 동작해야 한다
+      }
+      return !current
+    })
+  }
 
   if (!data) return null
-  const rows = data.strategies
+  const allRows = data.strategies
+  const rows = hideLosers
+    ? allRows.filter((s) => !(s.trade_count > 0 && s.wins === 0))
+    : allRows
+  const hiddenCount = allRows.length - rows.length
 
   const algorithmOf = (name) =>
     catalog?.strategies?.find((s) => s.name === name)?.algorithm || ''
@@ -65,8 +91,17 @@ export default function Leaderboard({ data, catalog, onReset, busy, storage }) {
       <h2>
         전략 경쟁 (모의매매)
         <span className="spacer" />
+        <label className="hint" style={{ cursor: 'pointer', marginRight: 12 }}>
+          <input
+            type="checkbox"
+            checked={hideLosers}
+            onChange={toggleHideLosers}
+            style={{ verticalAlign: 'middle', marginRight: 4 }}
+          />
+          승률 0% 숨기기{hiddenCount > 0 && ` (${hiddenCount})`}
+        </label>
         <span className="hint">
-          {rows.length}개 전략이 같은 시세로 동시에 매매 중
+          {allRows.length}개 전략이 같은 시세로 동시에 매매 중
         </span>
       </h2>
 
@@ -80,10 +115,12 @@ export default function Leaderboard({ data, catalog, onReset, busy, storage }) {
         />
       )}
 
-      {rows.length === 0 ? (
+      {allRows.length === 0 ? (
         <div className="empty">
           봇을 시작하면 모든 전략이 모의매매를 시작합니다.
         </div>
+      ) : rows.length === 0 ? (
+        <div className="empty">승률 0% 필터로 모든 전략이 숨겨졌습니다.</div>
       ) : (
         <div style={{ overflowX: 'auto' }}>
           <table className="leaderboard">
