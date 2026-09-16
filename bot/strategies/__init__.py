@@ -13,6 +13,7 @@ from bot.strategies.base import (
     strategy_catalog,
 )
 from bot.strategies import (  # noqa: F401  등록 트리거
+    accumulate,
     breakout,
     candlestick,
     channel,

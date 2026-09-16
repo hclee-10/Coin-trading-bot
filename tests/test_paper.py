@@ -450,3 +450,39 @@ def test_no_take_profit_means_no_cap():
     arena.step(SYMBOL, bars(150.0, high=200.0), tick(150.0))
 
     assert arena.store.paper_trades("runner") == []   # 아직 보유 중
+
+
+# --- 적립 (같은 방향 추가 진입) --------------------------------------------
+def test_pyramid_entries_average_into_one_position():
+    """pyramid 메타데이터가 있는 같은 방향 진입은 평균 단가로 합쳐진다."""
+    add = Signal(action=SignalAction.ENTER_LONG, strength=0.25,
+                 stop_loss=50.0, metadata={"pyramid": True}, reason="적립")
+    strategy = Scripted("dca", [
+        Signal(action=SignalAction.ENTER_LONG, strength=0.25, stop_loss=50.0,
+               reason="시작"),
+        add, HOLD,
+    ])
+    arena = arena_with({"dca": strategy}, notional_tiers=[100.0])
+
+    arena.step(SYMBOL, bars(100.0), tick(100.0))   # 100 에 1차
+    arena.step(SYMBOL, bars(80.0), tick(80.0))     # 80 에 적립
+
+    position = arena._positions[("dca", SYMBOL)]
+    # 100 USDT 씩: 1.0 코인 @100 + 1.25 코인 @80 → 평단 (100+100)/2.25
+    assert position.amount == pytest.approx(2.25)
+    assert position.entry_price == pytest.approx(200.0 / 2.25)
+    assert position.stop_loss == pytest.approx(50.0)   # 첫 진입의 안전판 유지
+    assert arena.store.paper_trades("dca") == []       # 아직 한 포지션이다
+
+
+def test_same_side_entry_without_pyramid_flag_is_ignored():
+    """일반 전략의 중복 진입 신호가 적립이 되면 안 된다."""
+    strategy = Scripted("plain", [LONG, LONG, HOLD])
+    arena = arena_with({"plain": strategy}, notional_tiers=[100.0])
+
+    arena.step(SYMBOL, bars(100.0), tick(100.0))
+    # 손절(기본 2%)에 닿지 않는 가격에서 두 번째 진입 신호
+    arena.step(SYMBOL, bars(99.5), tick(99.5))
+
+    position = arena._positions[("plain", SYMBOL)]
+    assert position.amount == pytest.approx(1.0)   # 그대로 1차분만
