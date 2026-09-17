@@ -54,7 +54,9 @@ CREATE TABLE IF NOT EXISTS paper_accounts (
     required_equity REAL NOT NULL DEFAULT 0,
     -- 계좌가 시작된 순간의 시장 가격. "시장(현물 보유) 대비 얼마나 잘했는가"
     -- 의 기준이고, AI 대회의 시장 대비 -5%p 규칙도 이 값으로 판정한다.
-    benchmark_price REAL NOT NULL DEFAULT 0
+    benchmark_price REAL NOT NULL DEFAULT 0,
+    -- 파산(평가 자기자본 ≤ 0) 시각. 0 이 아니면 실격 — 더는 매매하지 않는다.
+    bankrupt_at INTEGER NOT NULL DEFAULT 0
 );
 
 -- 모의매매가 낸 개별 주문. 왕복(paper_trades)과 달리 "몇 번 롱을 잡고 몇 번
@@ -121,6 +123,7 @@ _MIGRATIONS: tuple[tuple[str, str, str], ...] = (
     ("paper_positions", "take_profit", "REAL NOT NULL DEFAULT 0"),
     ("paper_accounts", "required_equity", "REAL NOT NULL DEFAULT 0"),
     ("paper_accounts", "benchmark_price", "REAL NOT NULL DEFAULT 0"),
+    ("paper_accounts", "bankrupt_at", "INTEGER NOT NULL DEFAULT 0"),
 )
 
 
@@ -292,6 +295,7 @@ class Store:
                     "strategy": strategy, "start_equity": start_equity,
                     "started_at": now_ms, "peak_equity": start_equity,
                     "required_equity": 0.0, "benchmark_price": 0.0,
+                    "bankrupt_at": 0,
                 }
             return dict(row)
 
@@ -310,6 +314,16 @@ class Store:
                 "UPDATE paper_accounts SET benchmark_price = ?"
                 " WHERE strategy = ? AND benchmark_price <= 0",
                 (price, strategy),
+            )
+            self._db.commit()
+
+    def mark_paper_bankrupt(self, strategy: str, now_ms: int) -> None:
+        """파산 = 실격. 한 번 기록되면 되돌리지 않는다 (초기화로만 리셋)."""
+        with self._lock:
+            self._db.execute(
+                "UPDATE paper_accounts SET bankrupt_at = ?"
+                " WHERE strategy = ? AND bankrupt_at = 0",
+                (now_ms, strategy),
             )
             self._db.commit()
 
