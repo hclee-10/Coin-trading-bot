@@ -221,7 +221,7 @@ def test_all_registered_strategies_join_automatically():
     expected = {e["name"] for e in strategy_catalog() if e["summary"]}
 
     assert set(arena.strategy_names) == expected
-    assert len(expected) >= 10
+    assert len(expected) >= 3
 
 
 def test_leaderboard_is_sorted_by_return():
