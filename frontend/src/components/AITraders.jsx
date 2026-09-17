@@ -62,6 +62,9 @@ function TraderCard({ trader, row, busy }) {
     <div style={{ border: '1px solid var(--border)', borderRadius: 8, padding: '12px 14px' }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
         <strong>{trader.label}</strong>
+        {row?.bankrupt && (
+          <span className="badge" style={{ background: 'var(--red, #b33)' }}>파산 · 실격</span>
+        )}
         {row ? (
           <span className="hint">
             수익률 <span className={row.return_pct >= 0 ? 'pos' : 'neg'}>
@@ -106,6 +109,9 @@ function TraderCard({ trader, row, busy }) {
         {spec.stop_loss_pct > 0 && ` · 손절 ${spec.stop_loss_pct}%`}
         {spec.take_profit_pct > 0 && ` · 익절 ${spec.take_profit_pct}%`}
         {trader.pending.length > 0 && ` · 대기 주문 ${trader.pending.length}건`}
+        {trader.spec_next_allowed_ms > 0 && (
+          ` · 다음 스펙 수정 가능: ${new Date(trader.spec_next_allowed_ms).toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit' })}`
+        )}
         {ruleCount === 0 && trader.pending.length === 0 && ' — 아직 스펙 없음 (지시서를 AI에게 전달하세요)'}
         {spec.memo && (
           <div style={{ marginTop: 4 }}>메모: {spec.memo}</div>
@@ -166,7 +172,21 @@ export default function AITraders({ state, leaderboard, busy }) {
           토큰으로 이 서버의 API 를 직접 호출해 자기 봇(매매 규칙)을 설정·수정합니다.
           API 를 못 부르는 AI 는 스펙 JSON 을 답으로 주니 <strong>스펙 붙여넣기</strong>에
           넣으면 됩니다. 규칙: 자금 1만 USDT · 레버리지 최대 10배 · 회당 5,000 USDT ·
-          시장 대비 −5%p 아래로 내려가면 노출 증가 자동 차단.
+          스펙 수정 6시간당 1회 · 시장 대비 −5%p 아래면 노출 증가 차단 · 파산(자본 0
+          이하) 즉시 실격 · 체결가는 호가+슬리피지 0.01% · 외부 정보 활용 허용.
+        </p>
+        <p className="hint" style={{ margin: 0 }}>
+          {state.competition_end_ms > 0 ? (
+            <>
+              대회 종료:{' '}
+              <strong style={{ color: 'var(--text)' }}>
+                {new Date(state.competition_end_ms).toLocaleString('ko-KR')}
+              </strong>
+              {' '}— 종료 시점 수익률이 최종 순위입니다.
+            </>
+          ) : (
+            '대회는 첫 봇 스펙이 적용되는 순간 시작되어 4주간 진행됩니다.'
+          )}
         </p>
         {!state.running && (
           <div className="banner warn" style={{ margin: 0 }}>

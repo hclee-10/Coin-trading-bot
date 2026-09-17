@@ -147,6 +147,42 @@ def test_falling_5pct_behind_the_market_blocks_new_exposure():
     assert arena._positions[("ai_gpt", SYMBOL)].amount < position.amount + 1e-9
 
 
+# --- 대회 규칙: 파산 = 실격 ---------------------------------------------------
+def test_bankruptcy_freezes_the_account():
+    """평가 자기자본이 0 이하로 내려가면 포지션이 정리되고 계좌가 동결된다."""
+    trader = AITrader("ai_gpt", "GPT")
+    arena = arena_with_trader(trader)
+    trader.set_spec({"leverage": 10, "orders": [
+        {"side": "short", "notional": 5000}, {"side": "short", "notional": 5000},
+    ]})
+    arena.step(SYMBOL, bars(100.0), tick(100.0))
+    arena.step(SYMBOL, bars(100.0), tick(100.0))   # 숏 1만 (100코인 @100)
+
+    # 가격이 2.1배 — 숏 손실 1.1만 > 자본 1만 → 파산
+    arena.step(SYMBOL, bars(210.0), tick(210.0))
+
+    assert ("ai_gpt", SYMBOL) not in arena._positions
+    trades = arena.store.paper_trades("ai_gpt")
+    assert trades and trades[0]["exit_reason"] == "bankrupt"
+
+    # 동결 — 새 주문을 넣어도 무시된다
+    trader.submit("long", 1000)
+    arena.step(SYMBOL, bars(210.0), tick(210.0))
+    assert ("ai_gpt", SYMBOL) not in arena._positions
+
+
+# --- 대회 규칙: 종료 후 신규 진입 차단 ----------------------------------------
+def test_new_exposure_is_blocked_after_the_competition_ends():
+    trader = AITrader("ai_grok", "그록")
+    arena = arena_with_trader(trader)
+    arena.ai_end_ms = 1   # 이미 끝난 대회
+
+    trader.submit("long", 1000)
+    arena.step(SYMBOL, bars(100.0), tick(100.0))
+
+    assert ("ai_grok", SYMBOL) not in arena._positions
+
+
 # --- 기존 동작 유지 ----------------------------------------------------------
 def test_manual_close_still_works():
     trader = AITrader("ai_gpt", "GPT")

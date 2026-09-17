@@ -117,13 +117,21 @@ def _ai_handoff_md(*, label: str, token: str, base_url: str, symbol: str) -> str
    실제 비율)가 항상 부과됩니다.
 3. **레버리지**: 스펙에서 1~10배 선택. 총 노출(포지션 명목가)은 자기자본 × 레버리지를
    넘을 수 없습니다.
-4. **주문 횟수 무제한**. 6시간마다 봇 스펙을 수정할 기회가 있습니다 — 성능을 계속
-   개선하세요.
+4. **주문 횟수 무제한**, 단 **봇 스펙 수정은 6시간에 1회**만 서버가 받습니다
+   (검증에 실패한 시도는 횟수에 세지 않음). 매 기회마다 성능을 개선하세요.
 5. **회당 주문 한도 5,000 USDT**. 이보다 큰 주문은 거부됩니다.
-6. 시장: {symbol} 무기한 선물(Gate.io 시세), 단방향 모드 — 같은 방향 주문은 쌓이고
-   (평단 갱신), 반대 방향 주문은 그만큼 상계됩니다(넘치면 뒤집힘).
-7. 봇은 15초마다 스펙의 규칙을 평가합니다. 스펙의 stop_loss_pct / take_profit_pct 를
-   설정하면 포지션에 손절/익절이 자동 적용됩니다.
+6. **파산 = 실격**: 평가 자기자본(미실현 포함)이 0 이하로 내려가면 남은 포지션이
+   강제 정리되고 계좌가 동결됩니다. 복구 기회는 없습니다.
+7. **대회 기간 4주**: 첫 봇 스펙이 적용된 순간부터 28일. 종료 시점의 수익률이
+   최종 순위이고, 종료 후에는 신규 진입과 스펙 수정이 차단됩니다 (정리만 가능).
+8. **외부 정보 허용**: 뉴스, 실시간 검색, 자체 분석 등 무엇이든 활용해도 됩니다.
+9. **체결**: 시장가 즉시 체결을 가정하되, 체결가는 호가 기준입니다 — 매수는
+   매도호가(ask), 매도는 매수호가(bid)에 슬리피지 0.01%를 더한 가격. 스프레드와
+   슬리피지가 비용이므로 초단타 회전은 그만큼 불리합니다.
+10. 시장: {symbol} 무기한 선물(Gate.io 시세), 단방향 모드 — 같은 방향 주문은 쌓이고
+    (평단 갱신), 반대 방향 주문은 그만큼 상계됩니다(넘치면 뒤집힘).
+11. 봇은 15초마다 스펙의 규칙을 평가합니다. 스펙의 stop_loss_pct / take_profit_pct 를
+    설정하면 포지션에 손절/익절이 자동 적용됩니다.
 
 ## 당신의 접근 권한 (비밀 — 다른 참가자와 공유 금지)
 - API 주소: `{base}`
@@ -479,6 +487,7 @@ def create_app(
                     "market_return_pct": s.market_return_pct,
                     "vs_market_pct": s.vs_market_pct,
                     "leverage": s.leverage,
+                    "bankrupt": s.bankrupt,
                     "total_fee": s.total_fee,
                     "total_funding": s.total_funding,
                     "best_pnl": s.best_pnl,
@@ -510,7 +519,12 @@ def create_app(
     # AI 경쟁 매매 — 클로드/GPT/그록의 판단을 웹으로 전달받아 체결한다.
     @app.get("/api/ai/state")
     def ai_state(_: str = Depends(require_auth)) -> dict:
-        return {"traders": supervisor.ai_state(), "running": supervisor.running}
+        return {
+            "traders": supervisor.ai_state(),
+            "running": supervisor.running,
+            # 0 = 아직 시작 전 (첫 봇 스펙이 적용되는 순간 4주 카운트 시작)
+            "competition_end_ms": supervisor.ai_competition_end_ms(),
+        }
 
     @app.post("/api/ai/order")
     def ai_order(body: AIOrderRequest, request: Request,
@@ -630,6 +644,9 @@ def create_app(
             "spec": trader.spec,
             "pending_orders": trader.pending(),
             "bot_running": supervisor.running,
+            # 대회 진행 정보 — 다음 스펙 교체 가능 시각과 대회 종료 시각(ms).
+            "spec_next_allowed_ms": supervisor.ai_spec_next_allowed_ms(trader.name),
+            "competition_end_ms": supervisor.ai_competition_end_ms(),
         }
 
     @app.post("/api/aibot/spec")

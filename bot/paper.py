@@ -12,7 +12,10 @@
 
 * 수수료는 항상 taker(0.05%)로 계산한다. 지정가로 체결됐을 수도 있지만 그렇게
   가정하면 성적이 부풀려진다.
-* 진입·청산은 현재가에 즉시 체결된다고 본다. 슬리피지는 반영하지 않는다.
+* 시장가 즉시 체결을 가정하되, 체결가는 **호가 기준**이다 — 매수는 매도호가(ask),
+  매도는 매수호가(bid)에, `slippage_pct` 만큼 불리한 쪽으로 더 밀린 가격.
+  현재가(last)로 체결시키면 스프레드 비용이 사라져 회전이 잦은 전략이 실제보다
+  좋아 보인다.
 * 손절은 봉의 저가/고가까지 확인한다 — 폴링 사이에 스쳤어도 걸린 것으로 본다.
 """
 
@@ -121,6 +124,7 @@ class StrategyStats:
     market_return_pct: float | None = None   # 시작 시점부터 시장(현물 보유) 수익률
     vs_market_pct: float | None = None       # 내 수익률 - 시장 수익률 (%p)
     leverage: float = 0.0               # 이 참가자가 쓰는 레버리지 (0 = 공용값)
+    bankrupt: bool = False              # 파산(자본 ≤ 0) = 실격 — 계좌 동결
     error: str | None = None
 
     @property
@@ -160,11 +164,16 @@ class PaperArena:
         taker_fee: float = TAKER_FEE,
         strategies: dict[str, Strategy] | None = None,
         extra_strategies: dict[str, Strategy] | None = None,
+        slippage_pct: float = 0.0,
     ) -> None:
         self.config = config
         self.store = store
         self.start_equity = start_equity
         self.taker_fee = taker_fee
+        # 체결가를 호가에서 이만큼(%) 더 불리하게 민다. 0 이면 호가만 쓴다.
+        self.slippage_pct = slippage_pct
+        # AI 대회 종료 시각(ms). 0 이면 무기한. 지나면 AI 봇의 신규 진입을 막는다.
+        self.ai_end_ms = 0
         self.risk = RiskManager(config.risk, leverage=config.exchange.leverage)
 
         # 기본은 등록된 전략 전부. 주입하면 그 목록만 경쟁시킨다.
@@ -275,6 +284,24 @@ class PaperArena:
         position = self._positions.get((name, symbol))
         price = ticker.last
 
+        # 파산 = 실격. 계좌가 동결됐으면 아무것도 하지 않는다.
+        if account.get("bankrupt_at", 0):
+            return
+
+        # 체결가는 호가 기준이다 — 매수는 매도호가(ask), 매도는 매수호가(bid)에
+        # 슬리피지만큼 더 불리하게. 호가가 없으면 현재가로 대신한다.
+        slip = self.slippage_pct / 100.0
+        buy_price = (ticker.ask or price) * (1 + slip)
+        sell_price = (ticker.bid or price) * (1 - slip)
+
+        def fill_for(side: PositionSide) -> float:
+            """그 방향으로 '주문을 낼 때'의 체결가 (롱 주문=매수, 숏 주문=매도)."""
+            return buy_price if side is PositionSide.LONG else sell_price
+
+        def close_fill(held: PaperPosition) -> float:
+            """보유 포지션을 '닫을 때'의 체결가 (롱 닫기=매도, 숏 닫기=매수)."""
+            return sell_price if held.side is PositionSide.LONG else buy_price
+
         # 계좌 시작 시점의 시장 가격을 기준선으로 남긴다. "시장 대비" 성적과
         # AI 대회의 -5%p 규칙이 이 값으로 판정된다.
         if account.get("benchmark_price", 0.0) <= 0 and price > 0:
@@ -323,6 +350,20 @@ class PaperArena:
 
         # 4) 전략 판단
         equity = self._equity(name, account)
+
+        # 파산 판정 (AI 대회 규칙): 평가 자기자본이 0 이하로 내려가면 실격 —
+        # 남은 포지션을 정리하고 계좌를 동결한다. 실제라면 강제청산이다.
+        if getattr(strategy, "category", "") == "ai":
+            marked_now = equity + (
+                position.unrealized_net(price, self.taker_fee) if position else 0.0
+            )
+            if marked_now <= 0:
+                if position is not None:
+                    self._close(name, position, close_fill(position), now_ms, "bankrupt")
+                self.store.mark_paper_bankrupt(name, now_ms)
+                log.warning("모의매매 '%s' 파산 — 계좌 동결 (실격)", name)
+                return
+
         model_position = (
             Position(
                 symbol=symbol, side=position.side, contracts=position.amount,
@@ -344,16 +385,15 @@ class PaperArena:
             )
         )
 
-        # AI 대회 규칙: 수익률이 (시장 수익률 - 5%p) 아래로 내려간 AI 봇은
-        # 노출을 늘리는 주문이 차단된다. 청산과 상계(반대 방향)는 허용 —
-        # 위험을 줄이는 길은 항상 열어 둔다.
-        if (
-            signal.is_entry
-            and getattr(strategy, "category", "") == "ai"
-            and account.get("benchmark_price", 0.0) > 0
-        ):
+        # AI 대회 규칙 두 가지가 신규 진입을 막는다. 청산과 상계(반대 방향)는
+        # 항상 허용 — 위험을 줄이는 길은 열어 둔다.
+        if signal.is_entry and getattr(strategy, "category", "") == "ai":
             increasing = position is None or signal.target_side is position.side
-            if increasing:
+            # ① 대회가 끝났다 — 신규 진입 없이 정리만 한다.
+            if increasing and self.ai_end_ms and now_ms > self.ai_end_ms:
+                signal = Signal(reason="대회 종료 — 신규 진입 차단 (청산·상계만 허용)")
+            # ② 시장 대비 -5%p 아래로 내려가면 노출 증가 차단.
+            elif increasing and account.get("benchmark_price", 0.0) > 0:
                 marked = equity + (
                     position.unrealized_net(price, self.taker_fee) if position else 0.0
                 )
@@ -365,18 +405,18 @@ class PaperArena:
                         " 노출 증가 차단 (청산·상계만 허용)"
                     ))
 
-        # 5) 체결
+        # 5) 체결 — 모든 주문은 그 방향의 호가 기반 체결가로 나간다.
         if position is not None:
             if signal.action is SignalAction.EXIT:
-                self._close(name, position, price, now_ms, "signal")
+                self._close(name, position, close_fill(position), now_ms, "signal")
             elif (
                 signal.is_entry
                 and signal.target_side is not position.side
                 and not signal.metadata.get("accumulate")
             ):
                 # 방향이 뒤집혔다 — 닫고 새로 연다.
-                self._close(name, position, price, now_ms, "reverse")
-                self._open(name, symbol, signal, price, now_ms, equity)
+                self._close(name, position, close_fill(position), now_ms, "reverse")
+                self._open(name, symbol, signal, fill_for(signal.target_side), now_ms, equity)
             elif (
                 signal.is_entry
                 and signal.target_side is position.side
@@ -385,7 +425,7 @@ class PaperArena:
                 # 같은 방향 추가 진입(적립·물타기). 전략이 metadata 로 명시할
                 # 때만 허용한다 — 일반 전략의 중복 진입 신호가 적립이 되면
                 # 안 된다. 평균 단가와 수량이 합쳐진다.
-                self._add(name, position, signal, price, now_ms, equity)
+                self._add(name, position, signal, fill_for(signal.target_side), now_ms, equity)
             elif (
                 signal.is_entry
                 and signal.target_side is not position.side
@@ -393,9 +433,10 @@ class PaperArena:
             ):
                 # 반대 방향 적립 = 상계. 실거래의 단방향 모드와 같은 규칙으로,
                 # 주문 금액만큼 순포지션이 줄고, 넘치면 뒤집힌다.
-                self._net_reduce(name, position, signal, price, now_ms, equity)
+                self._net_reduce(name, position, signal, fill_for(signal.target_side),
+                                 now_ms, equity)
         elif signal.is_entry:
-            self._open(name, symbol, signal, price, now_ms, equity)
+            self._open(name, symbol, signal, fill_for(signal.target_side), now_ms, equity)
 
         # 최대 낙폭을 위해 고점을 갱신한다. 실현손익은 위에서 이미 집계했으므로
         # 이번 주기에 닫힌 거래만 더하면 되지만, 정확성을 위해 다시 읽는다 —
@@ -733,6 +774,7 @@ class PaperArena:
                     account["required_equity"]
                     if "required_equity" in account else 0.0
                 ),
+                bankrupt=bool(account.get("bankrupt_at", 0)),
                 error=self._errors.get(name),
             )
 

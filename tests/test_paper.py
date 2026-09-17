@@ -542,6 +542,29 @@ def test_required_equity_records_the_worst_moment():
     assert row.required_equity == pytest.approx(80.0 / 3.0 + 20.0, rel=0.01)
 
 
+# --- 호가·슬리피지 체결 -------------------------------------------------------
+def test_fills_pay_the_slippage_in_both_directions():
+    """매수는 위로, 매도는 아래로 밀린 가격에 체결되어야 스프레드 비용이 남는다."""
+    arena = PaperArena(
+        make_config(), Store(None), taker_fee=0.0, slippage_pct=1.0,
+        strategies={"s": Scripted("s", [LONG, EXIT])},
+    )
+
+    arena.step(SYMBOL, bars(100.0), tick(100.0))
+    position = arena._positions[("s", SYMBOL)]
+    assert position.entry_price == pytest.approx(101.0)   # 매수 = +1%
+
+    arena.step(SYMBOL, bars(100.0), tick(100.0))
+    (trade,) = arena.store.paper_trades("s")
+    assert trade["exit_price"] == pytest.approx(99.0)     # 매도 = -1%
+
+
+def test_zero_slippage_keeps_the_old_fill_prices():
+    arena = arena_with({"s": Scripted("s", [LONG])})
+    arena.step(SYMBOL, bars(100.0), tick(100.0))
+    assert arena._positions[("s", SYMBOL)].entry_price == pytest.approx(100.0)
+
+
 # --- 상계 (반대 방향 적립) ---------------------------------------------------
 def test_opposite_accumulate_reduces_the_position_and_realizes_pnl():
     """롱 2코인 보유 중 반대 적립 1코인 → 1코인만 남고, 줄어든 몫은 실현된다."""

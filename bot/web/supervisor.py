@@ -45,6 +45,10 @@ ExchangeFactory = Callable[[], FuturesExchange]
 MIN_HEALTHY_RUN_SEC = 120.0
 MAX_RESTART_BACKOFF_SEC = 300.0
 
+# AI 대회: 스펙 수정 쿨다운과 대회 기간. 공정성은 서버가 강제해야 의미가 있다.
+AI_SPEC_COOLDOWN_SEC = 6 * 3600
+AI_COMPETITION_DAYS = 28
+
 
 class SupervisorError(Exception):
     """봇을 시작/정지할 수 없는 상태."""
@@ -144,10 +148,24 @@ class BotSupervisor:
                 except (ValueError, TypeError):
                     log.warning("'%s' 의 저장된 봇 스펙을 읽을 수 없습니다", name)
         self.arena = (
-            PaperArena(config, store, extra_strategies=self.ai_traders)
+            # 슬리피지 0.01%: 시장가 즉시 체결을 가정하되 호가+슬리피지로
+            # 체결가를 계산한다 (대회 규칙).
+            PaperArena(config, store, extra_strategies=self.ai_traders,
+                       slippage_pct=0.01)
             if store is not None
             else None
         )
+        # AI 대회 기간: 첫 봇 스펙이 적용된 순간부터 4주. 종료 시점의
+        # 수익률이 최종 순위다.
+        if self.arena is not None and store is not None:
+            saved_start = store.get_setting("ai_competition_start_ms")
+            if saved_start:
+                try:
+                    self.arena.ai_end_ms = (
+                        int(saved_start) + AI_COMPETITION_DAYS * 86_400_000
+                    )
+                except (ValueError, TypeError):
+                    pass
         self._exchange_factory = exchange_factory or (lambda: create_exchange(config.exchange))
         self._join_timeout = join_timeout
         self._lock = threading.Lock()
@@ -474,10 +492,18 @@ class BotSupervisor:
         return self.arena.leaderboard(prices)
 
     def reset_paper(self) -> None:
+        """모의매매 기록 초기화. AI 대회(스펙·쿨다운·기간)도 함께 리셋된다."""
         if self.arena is not None:
             self.arena.reset()
-        for trader in self.ai_traders.values():
+            self.arena.ai_end_ms = 0
+        for name, trader in self.ai_traders.items():
             trader.clear_pending()
+            trader.set_spec({})   # 기본값(아무것도 안 함)으로 되돌린다
+            if self.store is not None:
+                self.store.set_setting(f"ai_spec:{name}", "")
+                self.store.set_setting(f"ai_spec_at:{name}", "")
+        if self.store is not None:
+            self.store.set_setting("ai_competition_start_ms", "")
 
     # ------------------------------------------------------------------
     def submit_ai_order(self, trader: str, action: str, notional: float = 0.0) -> dict:
@@ -497,6 +523,7 @@ class BotSupervisor:
                 "pending": t.pending(),
                 "spec": t.spec,
                 "leverage": t.leverage,
+                "spec_next_allowed_ms": self.ai_spec_next_allowed_ms(name),
             }
             for name, t in self.ai_traders.items()
         ]
@@ -526,15 +553,60 @@ class BotSupervisor:
                 return trader
         return None
 
+    def ai_spec_next_allowed_ms(self, trader: str) -> int:
+        """이 트레이더가 다음으로 스펙을 바꿀 수 있는 시각(ms). 0 = 지금 가능."""
+        if self.store is None:
+            return 0
+        last = self.store.get_setting(f"ai_spec_at:{trader}")
+        if not last:
+            return 0
+        try:
+            allowed = int(last) + AI_SPEC_COOLDOWN_SEC * 1000
+        except (ValueError, TypeError):
+            return 0
+        return allowed if allowed > int(time.time() * 1000) else 0
+
+    def ai_competition_end_ms(self) -> int:
+        """대회 종료 시각(ms). 0 = 아직 시작 전 (첫 스펙 적용 시 시작)."""
+        return self.arena.ai_end_ms if self.arena is not None else 0
+
     def ai_set_spec(self, trader: str, raw) -> list[str]:
-        """봇 스펙 교체. 오류 목록이 비면 성공이고, 스펙은 저장소에 남는다."""
+        """봇 스펙 교체. 오류 목록이 비면 성공이고, 스펙은 저장소에 남는다.
+
+        대회 규칙: 성공한 교체는 6시간에 1회만 — API 를 직접 부르는 AI 가
+        15초마다 고치면 사람이 전달해 주는 AI 와 공정하지 않다. 검증에 실패한
+        시도는 횟수에 세지 않는다 (고쳐서 다시 낼 수 있어야 한다).
+        """
         if trader not in self.ai_traders:
             raise SupervisorError(f"알 수 없는 AI 트레이더 '{trader}'")
+        # 검증을 먼저 한다 — 형식이 틀린 시도는 쿨다운을 소모하지 않아야
+        # AI 가 오류를 고쳐서 바로 다시 낼 수 있다.
+        from bot.ai_traders import validate_spec
+        _, validation_errors = validate_spec(raw)
+        if validation_errors:
+            return validation_errors
+        now_ms = int(time.time() * 1000)
+        end = self.ai_competition_end_ms()
+        if end and now_ms > end:
+            return ["대회가 종료되었습니다 — 스펙을 더는 바꿀 수 없습니다"]
+        next_allowed = self.ai_spec_next_allowed_ms(trader)
+        if next_allowed:
+            wait_min = max(1, (next_allowed - now_ms) // 60_000)
+            return [f"스펙 수정은 6시간에 1회입니다 — 약 {wait_min}분 후에 다시 시도하세요"]
         errors = self.ai_traders[trader].set_spec(raw)
         if not errors and self.store is not None:
             self.store.set_setting(
                 f"ai_spec:{trader}", json.dumps(self.ai_traders[trader].spec)
             )
+            self.store.set_setting(f"ai_spec_at:{trader}", str(now_ms))
+            # 첫 스펙 적용이 대회의 출발선이다.
+            if not self.store.get_setting("ai_competition_start_ms"):
+                self.store.set_setting("ai_competition_start_ms", str(now_ms))
+                if self.arena is not None:
+                    self.arena.ai_end_ms = now_ms + AI_COMPETITION_DAYS * 86_400_000
+                log.warning(
+                    "AI 대회 시작 — %d일 뒤 수익률로 최종 순위", AI_COMPETITION_DAYS
+                )
         return errors
 
     def performance(self, symbol: str | None = None) -> Performance:

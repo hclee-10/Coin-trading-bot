@@ -1088,6 +1088,35 @@ def test_dashboard_spec_paste_applies_the_spec(traded_env):
     assert supervisor.ai_traders["ai_grok"].leverage == 7
 
 
+def test_spec_changes_are_limited_to_once_per_six_hours(traded_env):
+    """API 를 직접 부르는 AI 가 15초마다 고치면 공정하지 않다 — 서버가 막는다."""
+    client, supervisor, _ = traded_env
+    headers = login(client)
+
+    first = client.post(
+        "/api/ai/spec", headers=headers,
+        json={"trader": "ai_gemini", "spec": {"leverage": 3}},
+    )
+    assert first.status_code == 200
+
+    second = client.post(
+        "/api/ai/spec", headers=headers,
+        json={"trader": "ai_gemini", "spec": {"leverage": 5}},
+    )
+    assert second.status_code == 400
+    assert "6시간" in second.json()["detail"]
+    # 형식이 틀린 스펙은 쿨다운과 무관하게 검증 오류를 돌려준다
+    bad = client.post(
+        "/api/ai/spec", headers=headers,
+        json={"trader": "ai_gemini", "spec": {"leverage": 99}},
+    )
+    assert "leverage" in bad.json()["detail"]
+
+    # 첫 스펙 적용이 대회의 출발선 — 종료 시각(4주 뒤)이 잡힌다
+    state = client.get("/api/ai/state", headers=headers).json()
+    assert state["competition_end_ms"] > 0
+
+
 def test_ai_endpoints_require_auth(env):
     client, *_ = env
     assert client.get("/api/ai/state").status_code == 401
