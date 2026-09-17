@@ -181,3 +181,28 @@ def test_dca_stops_adding_at_the_exposure_cap():
 
     assert not signal.is_entry
     assert "한도" in signal.reason
+
+
+def test_dca_horizon_reacts_once_per_bar():
+    """1시간봉 하나의 급락에 한 번만 반응한다 — 같은 봉이 240번 보여도."""
+    strategy = get_strategy("dca_1h")
+    # 4시간 횡보 후 한 시간 동안 -3% (1시간봉 하나) + 다음 버킷 시작
+    closes = [100.0] * 48 + [100 - (i + 1) * 0.25 for i in range(12)] + [97.0] * 3
+    ctx = context(series(closes))
+
+    first = strategy.generate(ctx)
+    assert first.action is SignalAction.ENTER_LONG
+    assert first.metadata.get("accumulate") is True
+
+    # 같은 창(같은 1시간봉)으로 다시 판단 — 이미 반응한 봉이라 손대지 않는다
+    assert not strategy.generate(ctx).is_entry
+
+
+def test_dca_horizons_disagree_by_design():
+    """같은 움직임도 시간 단위에 따라 급변이기도, 아니기도 하다."""
+    # 5분봉 하나 -1.2%: 5분 자(±1.0%)에는 급변, 1시간 자(±2.5%)에는 아님
+    closes = [100.0] * 59 + [98.8, 98.8]
+    ctx = context(series(closes))
+
+    assert get_strategy("dca_5m").generate(ctx).action is SignalAction.ENTER_LONG
+    assert not get_strategy("dca_1h").generate(ctx).is_entry

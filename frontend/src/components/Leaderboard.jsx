@@ -149,7 +149,11 @@ export default function Leaderboard({ data, catalog, onReset, busy, storage }) {
                   >
                     <td>{index + 1}</td>
                     <td style={{ whiteSpace: 'nowrap' }}>
-                      {s.name === data.active && <span className="badge on" style={{ marginRight: 6 }}>실거래</span>}
+                      {s.name === data.active && (
+                        <span className={data.live ? 'badge on' : 'badge'} style={{ marginRight: 6 }}>
+                          {data.live ? '실거래' : '지정 전략'}
+                        </span>
+                      )}
                       {s.name}
                       <div className="hint" style={{ fontSize: 11 }}>
                         {CATEGORY_LABELS[s.category] || s.category}

@@ -76,6 +76,9 @@ export const api = {
   leaderboard: () => request('/api/leaderboard'),
   resetLeaderboard: (confirm) =>
     request('/api/leaderboard/reset', { method: 'POST', body: { confirm } }),
+  orderNotional: () => request('/api/settings/order-notional'),
+  setOrderNotional: (value) =>
+    request('/api/settings/order-notional', { method: 'POST', body: { value } }),
   start: (live, confirm) => request('/api/bot/start', { method: 'POST', body: { live, confirm } }),
   stop: () => request('/api/bot/stop', { method: 'POST' }),
   closeAll: (confirm) =>

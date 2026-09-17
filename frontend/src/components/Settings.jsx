@@ -1,3 +1,6 @@
+import { useState } from 'react'
+import { api } from '../api.js'
+
 // "지금 얼마로 매매하고 있나" 를 화면에서 바로 답할 수 있게 하는 패널.
 //
 // 이 값들은 서버의 실제 설정(config)에서 그대로 온다. 코드 기본값이 아니라
@@ -12,9 +15,30 @@ function num(value, digits = 2) {
 }
 
 export default function Settings({ config, equity }) {
+  const [amountInput, setAmountInput] = useState('')
+  const [saveState, setSaveState] = useState(null) // null | 'saving' | 'saved' | Error message
+
   if (!config) return null
 
   const { risk, trading, exchange } = config
+
+  const currentNotional = (risk.notional_tiers || [])[0]
+
+  const saveNotional = async () => {
+    const value = parseFloat(amountInput)
+    if (!Number.isFinite(value) || value <= 0) {
+      setSaveState('1 이상의 숫자를 입력하세요')
+      return
+    }
+    setSaveState('saving')
+    try {
+      await api.setOrderNotional(value)
+      setSaveState('saved')
+      setAmountInput('')
+    } catch (err) {
+      setSaveState(err.message || '저장 실패')
+    }
+  }
   const tiers = risk.sizing_mode === 'tiers' ? risk.notional_tiers || [] : []
   const takeProfit = risk.default_take_profit_pct || 0
 
@@ -36,6 +60,30 @@ export default function Settings({ config, equity }) {
         <span className="hint">서버에 적용된 실제 값</span>
       </h2>
       <div className="panel-body">
+        {/* 회당 주문 금액 — 재배포 없이 여기서 바로 바꾼다. DB 에 저장되어
+            재기동 후에도 유지되며, 실행 중인 봇과 모의매매에 즉시 반영된다. */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 14,
+                      flexWrap: 'wrap' }}>
+          <strong>회당 주문 금액</strong>
+          <span className="hint">현재 {num(currentNotional)} USDT</span>
+          <input
+            type="number"
+            min="1"
+            step="1"
+            placeholder="예: 10"
+            value={amountInput}
+            onChange={(e) => { setAmountInput(e.target.value); setSaveState(null) }}
+            style={{ width: 110 }}
+          />
+          <button onClick={saveNotional} disabled={saveState === 'saving' || !amountInput}>
+            {saveState === 'saving' ? '저장 중…' : '변경'}
+          </button>
+          {saveState === 'saved' && <span className="pos">적용됨</span>}
+          {saveState && saveState !== 'saving' && saveState !== 'saved' && (
+            <span className="neg">{saveState}</span>
+          )}
+        </div>
+
         {takeProfit > 0 && (
           <div className="banner warn" style={{ marginBottom: 14 }}>
             <strong>익절(수익률 제한)이 켜져 있습니다 — {takeProfit}%</strong>

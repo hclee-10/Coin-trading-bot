@@ -67,6 +67,10 @@ class CloseAllRequest(BaseModel):
     confirm: str = ""
 
 
+class OrderNotionalRequest(BaseModel):
+    value: float
+
+
 def create_app(
     config: Config,
     supervisor: BotSupervisor,
@@ -305,6 +309,9 @@ def create_app(
         rows = supervisor.leaderboard()
         return {
             "active": config.strategy.name,
+            # 실거래 배지는 실제로 실거래 모드로 돌 때만 '실거래'로 표기해야
+            # 한다 — 지정만 된 상태를 실거래로 보이면 사용자가 놀란다.
+            "live": bool(supervisor.running and supervisor.snapshot().live),
             "leverage": config.exchange.leverage,
             # 기록이 볼륨에 남는지. False 면 재배포 때마다 성적이 초기화되므로
             # 며칠씩 모아야 하는 이 데이터에서는 치명적이다 — 화면에서 경고한다.
@@ -338,6 +345,23 @@ def create_app(
                 for s in rows
             ],
         }
+
+    @app.get("/api/settings/order-notional")
+    def get_order_notional(_: str = Depends(require_auth)) -> dict:
+        return {"value": supervisor.order_notional()}
+
+    @app.post("/api/settings/order-notional")
+    def set_order_notional(body: OrderNotionalRequest, request: Request,
+                           _: str = Depends(require_auth)) -> dict:
+        """회당 주문 금액 변경. 실행 중인 봇과 모의매매에 즉시 반영된다."""
+        if not (1.0 <= body.value <= 100_000.0):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="주문 금액은 1 ~ 100,000 USDT 사이여야 합니다",
+            )
+        supervisor.set_order_notional(body.value)
+        log.info("회당 주문 금액 변경: %.2f USDT — ip=%s", body.value, client_ip(request))
+        return {"value": supervisor.order_notional()}
 
     @app.post("/api/leaderboard/reset")
     def reset_leaderboard(body: CloseAllRequest, request: Request,

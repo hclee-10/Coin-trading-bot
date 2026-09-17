@@ -33,6 +33,11 @@ CREATE TABLE IF NOT EXISTS fills (
 );
 CREATE INDEX IF NOT EXISTS idx_fills_symbol_ts ON fills(symbol, timestamp);
 
+CREATE TABLE IF NOT EXISTS app_settings (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS equity (
     timestamp   INTEGER PRIMARY KEY,  -- ms
     equity      REAL NOT NULL
@@ -276,6 +281,21 @@ class Store:
     def paper_accounts(self) -> list[dict[str, Any]]:
         with self._lock:
             return [dict(r) for r in self._db.execute("SELECT * FROM paper_accounts").fetchall()]
+
+    def get_setting(self, key: str) -> str | None:
+        with self._lock:
+            row = self._db.execute(
+                "SELECT value FROM app_settings WHERE key = ?", (key,)
+            ).fetchone()
+            return row["value"] if row else None
+
+    def set_setting(self, key: str, value: str) -> None:
+        with self._lock:
+            self._db.execute(
+                "INSERT OR REPLACE INTO app_settings (key, value) VALUES (?, ?)",
+                (key, value),
+            )
+            self._db.commit()
 
     def save_paper_position(self, strategy: str, symbol: str, data: dict[str, Any]) -> None:
         with self._lock:

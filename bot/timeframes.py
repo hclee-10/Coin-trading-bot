@@ -16,11 +16,11 @@ from __future__ import annotations
 
 from bot.models import Candle
 
-_UNIT_MS = {"m": 60_000, "h": 3_600_000, "d": 86_400_000, "w": 604_800_000}
+_UNIT_MS = {"s": 1_000, "m": 60_000, "h": 3_600_000, "d": 86_400_000, "w": 604_800_000}
 
 
 def timeframe_to_ms(timeframe: str) -> int:
-    """'5m', '1h', '4h', '1d' 같은 문자열을 밀리초로 바꾼다."""
+    """'10s', '5m', '1h', '4h', '1d' 같은 문자열을 밀리초로 바꾼다."""
     tf = timeframe.strip().lower()
     if len(tf) < 2 or tf[-1] not in _UNIT_MS:
         raise ValueError(f"알 수 없는 타임프레임 '{timeframe}' (예: 5m, 1h, 4h, 1d)")

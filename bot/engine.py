@@ -27,6 +27,7 @@ from bot.paper import PaperArena
 from bot.store import Fill as StoredFill
 from bot.store import Store
 from bot.strategies import Strategy, StrategyContext, get_strategy
+from bot.timeframes import timeframe_to_ms
 
 log = logging.getLogger(__name__)
 
@@ -254,7 +255,7 @@ class TradingEngine:
             except Exception:
                 log.exception("%s 체결 내역 동기화 실패 — 매매는 계속합니다", symbol)
 
-    # 다중 시간대 전략용 상위 캔들. 일목 구름(52+26봉)이 계산되고도 남는 양이다.
+    # 다중 시간대 전략용 추가 캔들. 일목 구름(52+26봉)이 계산되고도 남는 양이다.
     MTF_CANDLE_LIMIT = 160
     MTF_REFRESH_SEC = 60.0
 
@@ -276,7 +277,10 @@ class TradingEngine:
         for timeframe in sorted(needed):
             key = (symbol, timeframe)
             cached = self._mtf_cache.get(key)
-            if cached is not None and now - cached[0] < self.MTF_REFRESH_SEC:
+            # 캐시 수명은 봉 하나의 길이를 넘지 않는다 — 10초봉을 60초씩
+            # 캐시하면 초단위 전략이 봉을 통째로 놓친다.
+            ttl = min(self.MTF_REFRESH_SEC, timeframe_to_ms(timeframe) / 1000)
+            if cached is not None and now - cached[0] < ttl:
                 out[timeframe] = cached[1]
                 continue
             try:
