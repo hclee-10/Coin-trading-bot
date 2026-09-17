@@ -15,14 +15,16 @@ trading:
   quote_currency: USDT
 
 strategy:
-  name: dca_atr            # dca_atr | dca_pct | dca_channel | hold
+  name: dca_atr            # dca_atr | dca_pct | dca_channel |
+                           # dca_10s | dca_1m | dca_5m | dca_15m | dca_1h | hold
   # params:
   #   spike_atr: 2.0       # dca_atr 의 급변 문턱 (ATR 배수)
   #   max_exposure_pct: 1000
 
 risk:
   sizing_mode: tiers
-  notional_tiers: [10, 10, 10, 10]   # 회당 주문 금액 (USDT)
+  notional_tiers: [10, 10, 10, 10]   # 회당 주문 금액 (USDT).
+                                     # 대시보드 설정 패널에서 바꾼 값이 우선한다.
   # 아래는 기본값과 같다 — 조이고 싶을 때만 적는다.
   # max_position_notional_pct: 1000  # 자기자본 대비 노출 상한(%)
   # max_daily_loss_pct: 100          # 일일 손실 킬스위치 (100 = 사실상 끔)

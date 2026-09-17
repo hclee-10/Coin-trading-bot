@@ -113,6 +113,16 @@ class BotSupervisor:
     ) -> None:
         self.config = config
         self.store = store
+        # 대시보드에서 바꾼 회당 주문 금액을 재기동 후에도 유지한다.
+        # config.risk 객체는 엔진·실행기·모의매매가 전부 공유하므로, 리스트를
+        # 제자리에서 바꾸면 즉시 모든 곳에 반영된다.
+        if store is not None:
+            saved = store.get_setting("order_notional")
+            if saved:
+                try:
+                    self._apply_order_notional(float(saved))
+                except (ValueError, TypeError):
+                    pass
         # 전략 경쟁 모의매매. 봇이 꺼져 있어도 순위표는 볼 수 있어야 하므로
         # 여기서 만들어 들고 있는다.
         self.arena = PaperArena(config, store) if store is not None else None
@@ -316,6 +326,22 @@ class BotSupervisor:
         self.stop()
 
     # ------------------------------------------------------------------
+    def order_notional(self) -> float:
+        """현재 회당 주문 금액 (USDT)."""
+        tiers = self.config.risk.notional_tiers
+        return tiers[0] if tiers else 0.0
+
+    def set_order_notional(self, value: float) -> None:
+        """회당 주문 금액을 바꾼다. 실행 중인 봇과 모의매매에 즉시 반영된다."""
+        self._apply_order_notional(value)
+        if self.store is not None:
+            self.store.set_setting("order_notional", str(value))
+
+    def _apply_order_notional(self, value: float) -> None:
+        self.config.risk.notional_tiers[:] = [value] * max(
+            4, len(self.config.risk.notional_tiers)
+        )
+
     def snapshot(self) -> StatusSnapshot:
         """현재 상태. 네트워크 호출을 하지 않으므로 언제 불러도 즉시 돌아온다."""
         engine = self._engine

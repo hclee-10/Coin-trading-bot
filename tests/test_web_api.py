@@ -1045,3 +1045,28 @@ def test_status_says_where_records_are_being_written(env):
     body = client.get("/api/status", headers=login(client)).json()
     assert body["storage"]["durable"] is False
     assert "storage" in body and "path" in body["storage"]
+
+
+def test_order_notional_setting_applies_everywhere(env):
+    """대시보드에서 바꾼 회당 주문 금액이 설정 객체에 즉시 반영돼야 한다."""
+    client, supervisor, *_ = env
+    headers = login(client)
+
+    before = client.get("/api/settings/order-notional", headers=headers).json()
+    assert before["value"] == 10.0   # 코드 기본값
+
+    response = client.post("/api/settings/order-notional",
+                           json={"value": 25.0}, headers=headers)
+    assert response.status_code == 200
+    assert response.json()["value"] == 25.0
+    # config.risk 는 엔진·모의매매가 공유하는 객체다 — 여기 반영이 곧 전체 반영이다.
+    assert supervisor.config.risk.notional_tiers == [25.0, 25.0, 25.0, 25.0]
+
+
+def test_order_notional_rejects_nonsense(env):
+    client, *_ = env
+    headers = login(client)
+
+    response = client.post("/api/settings/order-notional",
+                           json={"value": 0}, headers=headers)
+    assert response.status_code == 400

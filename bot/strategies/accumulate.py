@@ -15,6 +15,16 @@
 * `dca_pct`     — 고정 % 기준: 3봉 누적 변화가 1.5% 이상
 * `dca_channel` — 범위 기준: 직전 20봉 최고가 돌파(급등) / 최저가 이탈(급락)
 
+여기에 더해 **급변을 재는 시간 단위별** 계열이 있다 — 같은 "봉 하나의 등락률"
+자를 10초·1분·5분·15분·1시간 봉에 들이댄다. 봇의 판단 주기(poll_interval,
+기본 15초)와 무관하게 각 전략은 자기 시간대의 봉을 거래소에서 직접 받는다:
+
+* `dca_10s` — 10초봉 ±0.3% (거래소가 주는 가장 짧은 봉 — '초단위'의 실체)
+* `dca_1m`  — 1분봉 ±0.5%
+* `dca_5m`  — 5분봉 ±1.0%
+* `dca_15m` — 15분봉 ±1.5%
+* `dca_1h`  — 1시간봉 ±2.5%
+
 실거래에서도 같은 방식으로 동작한다 — 실행기의 넷 적립 모드가 방향과 무관하게
 고정 금액 시장가 주문 하나만 내고, 단방향(one-way) 모드에서 같은 방향은 쌓이고
 반대 방향은 자동 상계된다(순포지션 감소/역전). 보호주문은 걸지 않는다. 시스템
@@ -28,6 +38,7 @@ from __future__ import annotations
 from bot.indicators import atr, donchian
 from bot.models import Candle, Conviction, PositionSide, Signal, SignalAction
 from bot.strategies.base import Strategy, StrategyContext, register_strategy
+from bot.timeframes import timeframe_to_ms
 
 _DESCRIPTION_COMMON = """
 급변이 오면 그 반대 방향으로 회당 고정 금액(기본 `notional_tiers` = 10달러)을
@@ -59,8 +70,8 @@ class _AccumulateBase(Strategy):
     def _setup_spike(self) -> None:
         """급변 판정 파라미터. 하위 클래스가 오버라이드한다."""
 
-    def _spike(self, candles: list[Candle]) -> tuple[int, str] | None:
-        """이번 봉에 급변이 '막 성립'했으면 (방향, 설명). 아니면 None."""
+    def _spike(self, ctx: StrategyContext) -> tuple[int, str] | None:
+        """이번 판단에서 급변이 '막 성립'했으면 (방향, 설명). 아니면 None."""
         raise NotImplementedError
 
     @property
@@ -73,7 +84,7 @@ class _AccumulateBase(Strategy):
             return Signal(reason="워밍업 부족")
 
         price = candles[-1].close
-        spike = self._spike(candles)
+        spike = self._spike(ctx)
 
         if spike is None:
             if ctx.position.is_open:
@@ -143,7 +154,8 @@ class DcaAtrStrategy(_AccumulateBase):
         self.spike_atr = float(self.params.get("spike_atr", 2.0))
         self.lookback = int(self.params.get("lookback", 3))
 
-    def _spike(self, candles):
+    def _spike(self, ctx):
+        candles = ctx.closed_candles
         closes = [c.close for c in candles]
         atr_values = atr(candles, 14)
         if not atr_values[-1] or len(closes) < self.lookback + 2:
@@ -188,8 +200,8 @@ class DcaPctStrategy(_AccumulateBase):
         self.spike_pct = float(self.params.get("spike_pct", 1.5))
         self.lookback = int(self.params.get("lookback", 3))
 
-    def _spike(self, candles):
-        closes = [c.close for c in candles]
+    def _spike(self, ctx):
+        closes = [c.close for c in ctx.closed_candles]
         if len(closes) < self.lookback + 2:
             return None
         base, base_prev = closes[-1 - self.lookback], closes[-2 - self.lookback]
@@ -240,7 +252,8 @@ class DcaChannelStrategy(_AccumulateBase):
     def warmup_candles(self) -> int:
         return self.period + 20
 
-    def _spike(self, candles):
+    def _spike(self, ctx):
+        candles = ctx.closed_candles
         highs, lows = donchian(candles, self.period)
         if highs[-1] is None or highs[-2] is None:
             return None
@@ -250,3 +263,105 @@ class DcaChannelStrategy(_AccumulateBase):
         if price < lows[-1] and previous >= lows[-2]:
             return -1, f"{self.period}봉 최저가 이탈"
         return None
+
+
+class _HorizonDca(_AccumulateBase):
+    """시간 단위별 무매도 적립식의 공통 뼈대.
+
+    급변 = 해당 시간대 **봉 하나**의 등락률(|종가/시가 − 1|)이 문턱 이상.
+    같은 봉이 여러 폴링에 걸쳐 보이므로(1시간봉은 240번), 마지막으로 반응한
+    봉의 시각을 기억해 한 봉에 한 번만 반응한다.
+
+    해당 시간대 봉을 구할 수 없는 환경(백테스트 등)에서는 기본 시간대 봉으로
+    근사하되, 문턱을 √(실제 봉 간격 ÷ 의도한 간격) 배로 키운다 — 변동성은
+    대략 시간의 제곱근에 비례하므로, 5분봉에 10초 자를 그대로 대면 모든 봉이
+    급변이 되어 버린다.
+    """
+
+    horizon = "5m"
+    default_spike_pct = 1.0
+
+    def _setup_spike(self) -> None:
+        self.spike_pct = float(self.params.get("spike_pct", self.default_spike_pct))
+        self._last_fired_ts = 0
+
+    def _spike(self, ctx):
+        bars = ctx.closed_candles_for(self.horizon)
+        if len(bars) < 2:
+            return None
+        horizon_ms = timeframe_to_ms(self.horizon)
+        spacing = bars[-1].timestamp - bars[-2].timestamp
+        threshold = self.spike_pct
+        if spacing > horizon_ms:
+            threshold *= (spacing / horizon_ms) ** 0.5
+
+        bar = bars[-1]
+        if bar.open <= 0 or bar.timestamp == self._last_fired_ts:
+            return None
+        move = (bar.close / bar.open - 1) * 100
+        if abs(move) < threshold:
+            return None
+        self._last_fired_ts = bar.timestamp
+        direction = 1 if move > 0 else -1
+        return direction, f"{self.horizon}봉 {move:+.2f}%"
+
+
+_HORIZON_ALGORITHM = """
+**급변 판정**  {horizon} 봉 하나의 등락률 |종가 ÷ 시가 − 1| ≥ {pct}%.
+같은 봉에는 한 번만 반응한다. 해당 시간대 봉은 거래소에서 직접 받고
+(판단 주기와 무관), 받을 수 없는 환경에서는 기본 봉으로 근사하며 문턱을
+√시간 비율로 보정한다.
+
+**주문**  급변의 반대 방향으로 회당 고정 금액(대시보드 '회당 주문 금액')
+시장가 하나 — 보유 여부와 무관. 같은 방향은 적립, 반대 방향은 상계. 보호주문
+없음.
+
+**청산 신호 없음**  익절·손절 청산 전부 내지 않는다.
+
+**적립 한도**  노출을 늘리는 쪽만 자기자본 × 1000% 에서 중단. 상계는 항상 허용.
+
+**파라미터**  `spike_pct`({pct}), `max_exposure_pct`(1000)
+"""
+
+_HORIZON_DESCRIPTION = """
+급변을 재는 시간 단위만 다른 형제 전략들({family})과 한 세트다. 짧은 단위일수록
+신호가 잦고 얕은 급변까지 잡으며(수수료가 그만큼 쌓인다), 긴 단위일수록 드물고
+큰 급변만 잡는다. 순위표에서 형제들의 낙폭·수수료·적립 횟수를 비교하면 "어떤
+시간 단위의 급변이 되돌아오는 급변인가"가 데이터로 드러난다.
+""" + _DESCRIPTION_COMMON
+
+
+def _register_horizon(name, horizon, pct, extra, note):
+    algorithm = _HORIZON_ALGORITHM.format(horizon=horizon, pct=pct)
+    description = note + _HORIZON_DESCRIPTION.format(
+        family="dca_10s · dca_1m · dca_5m · dca_15m · dca_1h"
+    )
+
+    @register_strategy(name)
+    class HorizonStrategy(_HorizonDca):
+        pass
+
+    HorizonStrategy.horizon = horizon
+    HorizonStrategy.default_spike_pct = pct
+    HorizonStrategy.extra_timeframes = extra
+    HorizonStrategy.summary = f"무매도 적립식 — {horizon} 봉 ±{pct}% 급변에 반응"
+    HorizonStrategy.description = description
+    HorizonStrategy.algorithm = algorithm
+    HorizonStrategy.__name__ = f"Dca{horizon.upper()}Strategy"
+    return HorizonStrategy
+
+
+_register_horizon(
+    "dca_10s", "10s", 0.3, ("10s",),
+    "'초단위'의 실체다 — 거래소가 주는 가장 짧은 봉(Gate 10초봉)을 쓴다. 봇의 "
+    "판단 주기(기본 15초)마다 최신 10초봉을 확인하므로, 실제 반응 지연은 "
+    "10~30초 사이다. 거래소가 10초봉을 지원하지 않으면 기본 봉으로 근사한다.",
+)
+_register_horizon("dca_1m", "1m", 0.5, ("1m",),
+                  "1분봉 하나가 ±0.5% 움직이면 급변으로 본다.")
+_register_horizon("dca_5m", "5m", 1.0, ("5m",),
+                  "5분봉 하나가 ±1.0% 움직이면 급변으로 본다.")
+_register_horizon("dca_15m", "15m", 1.5, ("15m",),
+                  "15분봉 하나가 ±1.5% 움직이면 급변으로 본다.")
+_register_horizon("dca_1h", "1h", 2.5, ("1h",),
+                  "1시간봉 하나가 ±2.5% 움직이면 급변으로 본다.")
