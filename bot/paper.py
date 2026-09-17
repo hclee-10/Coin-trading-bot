@@ -119,6 +119,13 @@ class StrategyStats:
     error: str | None = None
 
     @property
+    def realized_pnl(self) -> float:
+        """닫힌 거래에서 확정된 손익. 화면에서 평가손익과 분리해 보여준다 —
+        합쳐 놓으면 '보유 포지션이 물려 있는 것'과 '거래로 잃은 것'이 섞여
+        어디서 손실이 나는지 읽을 수 없다."""
+        return self.equity - self.start_equity
+
+    @property
     def net_pnl(self) -> float:
         return self.equity + self.unrealized - self.start_equity
 
