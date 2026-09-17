@@ -50,6 +50,68 @@ def _frontend_bundle(static_dir: Path | None) -> str | None:
     return match.group(1) if match else None
 
 
+def _ai_prompt_text(*, label, symbol, candles, row, leverage, margin_mode, timeframe) -> str:
+    """모든 AI 에게 똑같이 주는 질문지를 만든다.
+
+    같은 정보로 판단해야 공정한 경쟁이다 — 차이는 AI 의 판단뿐이어야 한다.
+    계좌 상태(포지션·자기자본)만 그 AI 자신의 것이다.
+    """
+    lines = [
+        "당신은 암호화폐 선물 모의투자 대회에 참가한 트레이더입니다.",
+        "아래 정보만 보고 지금 할 행동을 정하세요.",
+        "",
+        "[시장]",
+        f"- 종목: {symbol} 무기한 선물, 레버리지 {leverage:g}배, {margin_mode} 마진",
+    ]
+    closes = [c["close"] for c in candles]
+    if closes:
+        price = closes[-1]
+        lines.append(f"- 현재가: {price:,.1f} USDT")
+        # 봉 수로 기간을 계산한다 (기본 5분봉 → 12개=1시간).
+        for label_kr, bars in (("1시간", 12), ("6시간", 72), ("12시간", 144)):
+            if len(closes) > bars:
+                change = (price / closes[-1 - bars] - 1) * 100
+                lines.append(f"- {label_kr} 변화: {change:+.2f}%")
+        recent = candles[-12:]
+        lines.append(f"- 최근 {timeframe} 봉 {len(recent)}개 (시가→종가, 저가~고가):")
+        for c in recent:
+            lines.append(
+                f"  {c['open']:,.1f}→{c['close']:,.1f} ({c['low']:,.1f}~{c['high']:,.1f})"
+            )
+    else:
+        lines.append("- 시세 조회 실패 — 현재가를 직접 확인하고 판단하세요.")
+
+    lines += ["", "[내 계좌 (가상)]"]
+    if row is not None:
+        lines.append(f"- 자기자본: {row.equity:,.2f} USDT (시작 {row.start_equity:,.0f})")
+        if row.position_amount > 0:
+            side = "롱" if row.position_side == "long" else "숏"
+            lines.append(
+                f"- 포지션: {side} 명목 {row.position_notional:,.0f} USDT"
+                f" @ 평단 {row.position_entry:,.1f} (평가손익 {row.unrealized:+,.2f})"
+            )
+        else:
+            lines.append("- 포지션: 없음")
+    else:
+        lines.append("- 자기자본: 10,000 USDT (첫 판단)")
+        lines.append("- 포지션: 없음")
+
+    lines += [
+        "",
+        "[규칙]",
+        "- 단방향 모드: 같은 방향 주문은 쌓이고(평단 갱신), 반대 방향 주문은 그만큼 상계된다.",
+        "- 수수료 taker 0.05%, 펀딩비는 8시간마다 실제 비율로 부과된다.",
+        "- 손절/익절 예약 주문은 없다. 포지션을 닫으려면 다음 기회에 '청산'이라고 답해야 한다.",
+        "- 다음 판단 기회는 약 6시간 뒤다. 그 사이에는 개입할 수 없다.",
+        "",
+        "[답변 형식 — 첫 줄은 반드시 아래 중 하나]",
+        '"롱 <금액>달러" / "숏 <금액>달러" / "청산" / "관망"',
+        "금액은 1~100,000 사이 USDT 정수. 예: 숏 300달러",
+        "첫 줄 뒤에 판단 이유를 2~3문장으로 덧붙이세요.",
+    ]
+    return "\n".join(lines)
+
+
 class LoginRequest(BaseModel):
     username: str = Field(min_length=1, max_length=256)
     password: str = Field(min_length=1, max_length=512)
@@ -69,6 +131,12 @@ class CloseAllRequest(BaseModel):
 
 class OrderNotionalRequest(BaseModel):
     value: float
+
+
+class AIOrderRequest(BaseModel):
+    trader: str = Field(min_length=1, max_length=32)
+    action: str = Field(min_length=1, max_length=16)   # long | short | close
+    notional: float = 0.0
 
 
 def create_app(
@@ -374,6 +442,64 @@ def create_app(
         supervisor.set_order_notional(body.value)
         log.info("회당 주문 금액 변경: %.2f USDT — ip=%s", body.value, client_ip(request))
         return {"value": supervisor.order_notional()}
+
+    # ------------------------------------------------------------------
+    # AI 경쟁 매매 — 클로드/GPT/그록의 판단을 웹으로 전달받아 체결한다.
+    @app.get("/api/ai/state")
+    def ai_state(_: str = Depends(require_auth)) -> dict:
+        return {"traders": supervisor.ai_state(), "running": supervisor.running}
+
+    @app.post("/api/ai/order")
+    def ai_order(body: AIOrderRequest, request: Request,
+                 _: str = Depends(require_auth)) -> dict:
+        """AI 의 답을 주문 큐에 넣는다. 다음 봇 주기(15초)에 체결된다."""
+        if body.action not in ("long", "short", "close"):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="동작은 long / short / close 중 하나여야 합니다",
+            )
+        if body.action != "close" and not (1.0 <= body.notional <= 100_000.0):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="주문 금액은 1 ~ 100,000 USDT 사이여야 합니다",
+            )
+        try:
+            order = supervisor.submit_ai_order(body.trader, body.action, body.notional)
+        except (SupervisorError, ValueError) as exc:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)
+            ) from exc
+        log.info(
+            "AI 매매 주문 입력: %s %s %.2f — ip=%s",
+            body.trader, body.action, body.notional, client_ip(request),
+        )
+        return {"ok": True, "order": order, "running": supervisor.running}
+
+    @app.get("/api/ai/prompt")
+    def ai_prompt(trader: str = "ai_gpt", _: str = Depends(require_auth)) -> dict:
+        """모든 AI 에게 똑같이 줄 질문지. 시세와 그 AI 의 계좌 상태가 담긴다."""
+        traders = {t["name"]: t["label"] for t in supervisor.ai_state()}
+        if trader not in traders:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"알 수 없는 AI 트레이더 '{trader}'",
+            )
+        symbol = config.trading.symbols[0] if config.trading.symbols else None
+        if symbol is None:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST, detail="심볼이 설정되지 않았습니다"
+            )
+        candles = supervisor.candles(symbol)
+        row = next((s for s in supervisor.leaderboard() if s.name == trader), None)
+        return {
+            "trader": trader,
+            "prompt": _ai_prompt_text(
+                label=traders[trader], symbol=symbol, candles=candles, row=row,
+                leverage=config.exchange.leverage,
+                margin_mode=config.exchange.margin_mode,
+                timeframe=config.trading.timeframe,
+            ),
+        }
 
     @app.post("/api/leaderboard/reset")
     def reset_leaderboard(body: CloseAllRequest, request: Request,

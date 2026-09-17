@@ -994,6 +994,59 @@ def test_leaderboard_reset_clears_records(traded_env):
     assert store.paper_accounts() == []
 
 
+# --- AI 경쟁 매매 -----------------------------------------------------------
+def test_ai_order_lands_in_the_pending_queue(traded_env):
+    client, supervisor, _ = traded_env
+    headers = login(client)
+
+    response = client.post(
+        "/api/ai/order",
+        json={"trader": "ai_gpt", "action": "short", "notional": 300.0},
+        headers=headers,
+    )
+
+    assert response.status_code == 200
+    state = client.get("/api/ai/state", headers=headers).json()
+    gpt = next(t for t in state["traders"] if t["name"] == "ai_gpt")
+    assert gpt["pending"] == [{"action": "short", "notional": 300.0}]
+
+
+def test_ai_order_rejects_bad_input(traded_env):
+    client, *_ = traded_env
+    headers = login(client)
+
+    assert client.post(
+        "/api/ai/order", json={"trader": "ai_gpt", "action": "hedge", "notional": 10},
+        headers=headers,
+    ).status_code == 400
+    assert client.post(
+        "/api/ai/order", json={"trader": "ai_gpt", "action": "long", "notional": 0},
+        headers=headers,
+    ).status_code == 400
+    assert client.post(
+        "/api/ai/order", json={"trader": "ai_nobody", "action": "long", "notional": 10},
+        headers=headers,
+    ).status_code == 400
+
+
+def test_ai_prompt_carries_the_answer_format(traded_env):
+    """AI 웹에 그대로 붙여넣는 질문지 — 답변 형식이 반드시 들어 있어야 한다."""
+    client, *_ = traded_env
+    headers = login(client)
+
+    body = client.get("/api/ai/prompt?trader=ai_grok", headers=headers).json()
+
+    assert "답변 형식" in body["prompt"]
+    assert "청산" in body["prompt"]
+    assert "규칙" in body["prompt"]
+
+
+def test_ai_endpoints_require_auth(env):
+    client, *_ = env
+    assert client.get("/api/ai/state").status_code == 401
+    assert client.post("/api/ai/order", json={}).status_code == 401
+
+
 def test_strategies_endpoint_carries_the_algorithm(env):
     """전략 상세에 실제 규칙이 있어야 왜 진입했는지 알 수 있다."""
     client, *_ = env
