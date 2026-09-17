@@ -338,6 +338,8 @@ def create_app(
                     "liquidation_risk_pct": s.liquidation_risk_pct,
                     "long_orders": s.long_orders,
                     "short_orders": s.short_orders,
+                    "long_avg_price": s.long_avg_price,
+                    "short_avg_price": s.short_avg_price,
                     "required_equity": s.required_equity,
                     "position_side": s.position_side,
                     "position_amount": s.position_amount,

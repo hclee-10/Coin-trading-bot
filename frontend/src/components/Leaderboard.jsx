@@ -210,8 +210,15 @@ export default function Leaderboard({ data, catalog, onReset, busy, storage }) {
                             </div>
                           )}
                           <div className="hint" style={{ margin: '10px 0' }}>
-                            {s.wins}승 {s.losses}패 · 롱 주문 {s.long_orders ?? 0}회 ·
-                            숏 주문 {s.short_orders ?? 0}회 · 최고 {signed(s.best_pnl)} ·
+                            {s.wins}승 {s.losses}패 ·{' '}
+                            <span className="pos">롱</span> 주문 {s.long_orders ?? 0}회
+                            {s.long_avg_price > 0 &&
+                              ` (평균 ${s.long_avg_price.toLocaleString(undefined, { maximumFractionDigits: 1 })})`}
+                            {' · '}
+                            <span className="neg">숏</span> 주문 {s.short_orders ?? 0}회
+                            {s.short_avg_price > 0 &&
+                              ` (평균 ${s.short_avg_price.toLocaleString(undefined, { maximumFractionDigits: 1 })})`}
+                            {' '}· 최고 {signed(s.best_pnl)} ·
                             최악 {signed(s.worst_pnl)} · 수수료 {s.total_fee.toFixed(2)} ·
                             펀딩비 {s.total_funding.toFixed(2)} ·
                             가상 자기자본 {s.equity.toFixed(2)} / {s.start_equity.toFixed(0)}

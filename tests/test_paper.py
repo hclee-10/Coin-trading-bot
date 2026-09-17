@@ -507,6 +507,10 @@ def test_orders_are_counted_by_direction():
     (row,) = arena.leaderboard({SYMBOL: 95.0})
     assert row.long_orders == 2
     assert row.short_orders == 1
+    # 방향별 평균 체결가는 수량 가중이다: 100 USDT 씩 @100(1코인)과
+    # @90(1.11코인) → (100+100) / (1+100/90). 단순 평균 95 가 아니다.
+    assert row.long_avg_price == pytest.approx(200.0 / (1.0 + 100.0 / 90.0))
+    assert row.short_avg_price == pytest.approx(95.0)
     # 현재 순포지션도 방향·수량·평단으로 보여야 "보유 1" 보다 읽힌다
     assert row.position_side == "long"
     assert row.position_amount > 0
@@ -519,7 +523,7 @@ def test_order_counts_are_wiped_by_reset():
 
     arena.reset()
 
-    assert arena.store.paper_order_counts() == {}
+    assert arena.store.paper_order_stats() == {}
 
 
 # --- 청산을 버티는 데 필요했던 자본 ------------------------------------------

@@ -381,16 +381,26 @@ class Store:
             )
             self._db.commit()
 
-    def paper_order_counts(self) -> dict[str, dict[str, int]]:
-        """전략별 롱/숏 주문 횟수. {전략: {"long": n, "short": n}}"""
+    def paper_order_stats(self) -> dict[str, dict[str, dict[str, float]]]:
+        """전략별·방향별 주문 횟수와 평균 체결가.
+
+        {전략: {"long": {"count": n, "avg_price": p}, "short": {...}}}
+
+        평균가는 수량 가중이다 — 회당 금액이 같아도 가격대에 따라 체결 수량이
+        달라지므로, 단순 평균은 실제 평단과 어긋난다.
+        """
         with self._lock:
             rows = self._db.execute(
-                "SELECT strategy, side, COUNT(*) AS n FROM paper_orders"
+                "SELECT strategy, side, COUNT(*) AS n, SUM(amount) AS amount,"
+                " SUM(notional) AS notional FROM paper_orders"
                 " GROUP BY strategy, side"
             ).fetchall()
-        out: dict[str, dict[str, int]] = {}
+        out: dict[str, dict[str, dict[str, float]]] = {}
         for r in rows:
-            out.setdefault(r["strategy"], {"long": 0, "short": 0})[r["side"]] = r["n"]
+            avg = (r["notional"] / r["amount"]) if r["amount"] else 0.0
+            out.setdefault(r["strategy"], {})[r["side"]] = {
+                "count": r["n"], "avg_price": avg,
+            }
         return out
 
     def paper_trades(self, strategy: str | None = None, limit: int = 2000) -> list[dict[str, Any]]:
