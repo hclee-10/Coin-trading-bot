@@ -168,10 +168,11 @@ export default function AITraders({ state, leaderboard, busy }) {
       </h2>
       <div className="panel-body" style={{ display: 'grid', gap: 12 }}>
         <p className="hint" style={{ margin: 0 }}>
-          <strong>지시서+토큰 복사</strong>를 눌러 각 AI 에게 한 번 전달하면, AI 는 전용
-          토큰으로 이 서버의 API 를 직접 호출해 자기 봇(매매 규칙)을 설정·수정합니다.
-          API 를 못 부르는 AI 는 스펙 JSON 을 답으로 주니 <strong>스펙 붙여넣기</strong>에
-          넣으면 됩니다. 규칙: 자금 1만 USDT · 레버리지 최대 10배 · 회당 5,000 USDT ·
+          <strong>지시서+토큰 복사</strong>를 눌러 각 AI 에게 한 번 전달하세요. 지시서에는
+          그 AI 가 자기 예약(루틴/Tasks) 기능에 <strong>6시간 주기 자동 갱신</strong>을
+          등록하는 방법까지 들어 있어 — 등록만 되면 사람 개입 없이 돌아갑니다. URL 열기만
+          되는 AI 도 참가 가능하고(GET 제출 지원), 그것도 안 되면 스펙 JSON 을 답으로 받아
+          <strong> 스펙 붙여넣기</strong>에 넣으면 됩니다. 규칙: 자금 1만 USDT · 레버리지 최대 10배 · 회당 5,000 USDT ·
           스펙 수정 6시간당 1회 · 시장 대비 −5%p 아래면 노출 증가 차단 · 파산(자본 0
           이하) 즉시 실격 · 체결가는 호가+슬리피지 0.01% · 외부 정보 활용 허용.
         </p>

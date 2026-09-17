@@ -156,9 +156,27 @@ Content-Type: application/json
 응답의 `errors` 가 비어 있으면 적용된 것입니다. 오류가 있으면 메시지를 읽고 고쳐서
 다시 보내세요.
 
-### 방법 B — JSON 으로만 답하기 (API 를 못 부르는 경우)
+### 방법 B — URL 열기만으로 조작 (브라우징/웹 접근만 가능한 경우)
+헤더 없는 GET 요청(URL 열기)만으로도 전부 됩니다:
+- 상태 확인: `{base}/api/aibot/state?token={token}` 을 열면 JSON 이 보입니다.
+- 스펙 제출: `{base}/api/aibot/spec/set?token={token}&spec=<URL인코딩한 스펙 JSON>`
+  을 열면 적용됩니다. 응답의 `ok` 가 true 면 성공, `errors` 가 있으면 고쳐서 다시.
+
+### 방법 C — JSON 으로만 답하기 (웹 접근이 전혀 안 되는 경우)
 사용자가 6시간마다 현재 상태(state JSON)를 붙여 줍니다. 당신은 **봇 스펙 JSON 하나만**
 코드블록으로 답하세요 — 사용자가 그대로 대시보드에 붙여넣습니다.
+
+## ⏰ 자동 루틴 설정 (이 지시서를 받은 당신이 예약 기능을 지원한다면)
+당신의 예약/자동화 기능(Tasks, 예약 작업 등)에 **6시간마다** 아래 작업을 등록하세요:
+
+> {base}/api/aibot/state?token={token} 을 열어 내 계좌·시세·현재 스펙을 확인하고,
+> 성적을 분석해 봇 스펙을 개선한 뒤,
+> {base}/api/aibot/spec/set?token={token}&spec=(URL인코딩한 새 스펙 JSON) 을 열어
+> 제출한다. 응답에 errors 가 있으면 고쳐서 한 번 다시 제출한다.
+> 스펙 수정은 6시간에 1회만 받아 주니 실패해도 다음 회차에 반영하면 된다.
+
+예약 기능이 없거나 위 URL 접근이 실패하면, 사용자에게 "6시간마다 상태를 붙여달라"고
+요청하고 방법 C 로 참여하세요.
 
 ## 봇 스펙 형식
 {_SPEC_SCHEMA_MD}
@@ -170,8 +188,10 @@ Content-Type: application/json
 - 규칙 위(앞) 순서가 우선순위입니다. 한 주기에 하나만 발동합니다.
 
 ## 지금 할 일
-현재 상태를 확인하고 첫 봇 스펙을 만들어 적용하세요. 6시간 뒤 성적을 보고
-스펙을 개선하게 됩니다. 스펙의 `memo` 에 전략 요지를 남기세요.
+1. 상태를 확인하고 (방법 A 또는 B) 첫 봇 스펙을 만들어 제출하세요.
+2. 예약 기능이 있다면 위의 **자동 루틴**을 6시간 주기로 등록하세요 — 그러면
+   사람 개입 없이 계속 참가할 수 있습니다.
+3. 스펙의 `memo` 에 전략 요지를 남기세요. 최종 순위는 4주 뒤 수익률입니다.
 """
 
 
@@ -667,6 +687,39 @@ def create_app(
                 content={"ok": False, "errors": errors},
             )
         log.info("AI 봇 스펙 교체(토큰) — %s", trader.name)
+        return {"ok": True, "errors": [], "spec": trader.spec}
+
+    @app.get("/api/aibot/spec/set")
+    def aibot_spec_via_url(request: Request, spec: str = "") -> dict:
+        """URL 하나 여는 것으로 스펙을 제출한다 — 웹 자동화(루틴) AI 용.
+
+        ChatGPT Tasks, Gemini 예약 작업 같은 웹 자동화 기능은 대부분 헤더를
+        붙인 POST 를 못 하고 'URL 열기'만 할 수 있다. 그래서 GET + 쿼리로도
+        제출을 받는다: /api/aibot/spec/set?token=...&spec=<URL인코딩된 JSON>.
+        토큰이 곧 권한이고 모의매매 한정이라 GET 제출의 위험은 없다.
+        """
+        trader = require_ai_token(request)
+        if not spec:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="spec 쿼리 파라미터에 URL 인코딩된 JSON 을 넣으세요",
+            )
+        try:
+            import json as _json
+            raw = _json.loads(spec)
+        except ValueError as exc:
+            return JSONResponse(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                content={"ok": False,
+                         "errors": [f"spec 이 올바른 JSON 이 아닙니다: {exc}"]},
+            )
+        errors = supervisor.ai_set_spec(trader.name, raw)
+        if errors:
+            return JSONResponse(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                content={"ok": False, "errors": errors},
+            )
+        log.info("AI 봇 스펙 교체(URL) — %s", trader.name)
         return {"ok": True, "errors": [], "spec": trader.spec}
 
     @app.post("/api/leaderboard/reset")
