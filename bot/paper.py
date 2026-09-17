@@ -109,6 +109,8 @@ class StrategyStats:
     liquidation_risk_pct: float = 0.0   # 청산가까지 간 비율의 최댓값
     long_orders: int = 0                # 롱 방향으로 낸 주문 횟수 (적립·상계 포함)
     short_orders: int = 0               # 숏 방향으로 낸 주문 횟수
+    long_avg_price: float = 0.0         # 롱 주문들의 수량가중 평균 체결가
+    short_avg_price: float = 0.0        # 숏 주문들의 수량가중 평균 체결가
     required_equity: float = 0.0        # 청산을 버티는 데 필요했던 최소 자기자본
     position_side: str = ""             # 현재 순포지션 방향 (long | short | "")
     position_amount: float = 0.0        # 현재 순포지션 수량 (베이스 코인)
@@ -651,7 +653,7 @@ class PaperArena:
 
         catalog = {e["name"]: e for e in strategy_catalog()}
         accounts = {a["strategy"]: a for a in self.store.paper_accounts()}
-        order_counts = self.store.paper_order_counts()
+        order_stats = self.store.paper_order_stats()
         rows: list[StrategyStats] = []
 
         for name in self._strategies:
@@ -675,8 +677,10 @@ class PaperArena:
                 total_funding=sum(t["funding"] for t in trades),
                 best_pnl=max((t["pnl"] for t in trades), default=0.0),
                 worst_pnl=min((t["pnl"] for t in trades), default=0.0),
-                long_orders=order_counts.get(name, {}).get("long", 0),
-                short_orders=order_counts.get(name, {}).get("short", 0),
+                long_orders=int(order_stats.get(name, {}).get("long", {}).get("count", 0)),
+                short_orders=int(order_stats.get(name, {}).get("short", {}).get("count", 0)),
+                long_avg_price=order_stats.get(name, {}).get("long", {}).get("avg_price", 0.0),
+                short_avg_price=order_stats.get(name, {}).get("short", {}).get("avg_price", 0.0),
                 required_equity=(
                     account["required_equity"]
                     if "required_equity" in account else 0.0
