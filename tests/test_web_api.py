@@ -1042,6 +1042,9 @@ def test_ai_handoff_carries_the_token_and_the_rules(traded_env):
     assert "대회 규칙" in body["markdown"]
     assert "5,000" in body["markdown"] or "5000" in body["markdown"]
     assert "/api/aibot/spec" in body["markdown"]
+    # 예약(루틴) 기능에 등록할 자동화 지시문이 들어 있어야 한다
+    assert "자동 루틴" in body["markdown"]
+    assert "/api/aibot/spec/set" in body["markdown"]
     # 같은 트레이더는 항상 같은 토큰 — 다시 눌러도 바뀌면 안 된다
     again = client.get("/api/ai/handoff?trader=ai_gemini", headers=headers).json()
     assert again["token"] == body["token"]
@@ -1073,6 +1076,25 @@ def test_aibot_endpoints_work_with_the_token_only(traded_env):
     )
     assert bad.status_code == 400
     assert any("leverage" in e for e in bad.json()["errors"])
+
+
+def test_spec_can_be_submitted_by_opening_a_url(traded_env):
+    """웹 자동화(루틴) AI 는 URL 열기만 할 수 있다 — GET 제출이 되어야 한다."""
+    from urllib.parse import quote
+
+    client, supervisor, _ = traded_env
+    headers = login(client)
+    token = client.get("/api/ai/handoff?trader=ai_grok", headers=headers).json()["token"]
+
+    spec = quote('{"leverage": 4, "memo": "URL 제출"}')
+    response = client.get(f"/api/aibot/spec/set?token={token}&spec={spec}")
+
+    assert response.status_code == 200
+    assert response.json()["ok"] is True
+    assert supervisor.ai_traders["ai_grok"].leverage == 4
+
+    # 토큰이 없으면 거부
+    assert client.get(f"/api/aibot/spec/set?spec={spec}").status_code == 401
 
 
 def test_dashboard_spec_paste_applies_the_spec(traded_env):
