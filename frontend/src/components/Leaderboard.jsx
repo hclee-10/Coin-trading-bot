@@ -132,8 +132,10 @@ export default function Leaderboard({ data, catalog, onReset, busy, storage }) {
                 <th>수익금액</th>
                 <th>수수료</th>
                 <th>거래</th>
+                <th>롱/숏</th>
                 <th>승률</th>
                 <th>손절률</th>
+                <th>필요자본</th>
                 <th>청산위험</th>
                 <th>최대낙폭</th>
                 <th>기간</th>
@@ -157,7 +159,15 @@ export default function Leaderboard({ data, catalog, onReset, busy, storage }) {
                       {s.name}
                       <div className="hint" style={{ fontSize: 11 }}>
                         {CATEGORY_LABELS[s.category] || s.category}
-                        {s.open_positions > 0 && ` · 보유 ${s.open_positions}`}
+                        {s.position_amount > 0 && (
+                          <>
+                            {' · '}
+                            <span className={s.position_side === 'long' ? 'pos' : 'neg'}>
+                              {s.position_side === 'long' ? '롱' : '숏'}
+                            </span>
+                            {` ${s.position_notional.toFixed(1)}$ @ ${s.position_entry.toLocaleString(undefined, { maximumFractionDigits: 1 })}`}
+                          </>
+                        )}
                         {s.error && ' · ⚠️ 오류'}
                       </div>
                     </td>
@@ -169,8 +179,20 @@ export default function Leaderboard({ data, catalog, onReset, busy, storage }) {
                         수익률만 봐서는 안 보인다. */}
                     <td className="hint">-{s.total_fee.toFixed(2)}</td>
                     <td>{s.trade_count}</td>
+                    {/* 주문 방향별 횟수. 적립식은 주문 여러 개가 포지션 하나로
+                        합쳐지므로 거래(왕복) 수만으로는 보이지 않는다. */}
+                    <td style={{ whiteSpace: 'nowrap' }}>
+                      <span className="pos">{s.long_orders ?? 0}</span>
+                      <span className="hint"> / </span>
+                      <span className="neg">{s.short_orders ?? 0}</span>
+                    </td>
                     <td>{pct(s.win_rate, 0)}</td>
                     <td>{pct(s.stop_out_rate, 0)}</td>
+                    {/* 청산 안 당하고 버티는 데 지금까지 필요했던 최소 자기자본
+                        (증거금 + 최악 순간의 평가손실). 이 실험의 핵심 답이다. */}
+                    <td className="hint" style={{ whiteSpace: 'nowrap' }}>
+                      {s.required_equity > 0 ? `${Math.ceil(s.required_equity).toLocaleString()}$` : '—'}
+                    </td>
                     <td className={riskClass(s.liquidation_risk_pct)}>
                       {pct(s.liquidation_risk_pct, 0)}
                     </td>
@@ -179,7 +201,7 @@ export default function Leaderboard({ data, catalog, onReset, busy, storage }) {
                   </tr>
                   {expanded === s.name && (
                     <tr>
-                      <td colSpan={11} style={{ textAlign: 'left', padding: 0 }}>
+                      <td colSpan={13} style={{ textAlign: 'left', padding: 0 }}>
                         <div className="strategy-detail" style={{ margin: '0 16px 14px' }}>
                           <strong>{s.summary}</strong>
                           {s.error && (
@@ -188,11 +210,21 @@ export default function Leaderboard({ data, catalog, onReset, busy, storage }) {
                             </div>
                           )}
                           <div className="hint" style={{ margin: '10px 0' }}>
-                            {s.wins}승 {s.losses}패 · 최고 {signed(s.best_pnl)} ·
+                            {s.wins}승 {s.losses}패 · 롱 주문 {s.long_orders ?? 0}회 ·
+                            숏 주문 {s.short_orders ?? 0}회 · 최고 {signed(s.best_pnl)} ·
                             최악 {signed(s.worst_pnl)} · 수수료 {s.total_fee.toFixed(2)} ·
                             펀딩비 {s.total_funding.toFixed(2)} ·
                             가상 자기자본 {s.equity.toFixed(2)} / {s.start_equity.toFixed(0)}
                           </div>
+                          {s.required_equity > 0 && (
+                            <div className="hint" style={{ margin: '10px 0' }}>
+                              청산을 버티는 데 필요했던 최소 자본:{' '}
+                              <strong style={{ color: 'var(--text)' }}>
+                                {Math.ceil(s.required_equity).toLocaleString()} USDT
+                              </strong>
+                              {' '}(포지션 증거금 + 최악 순간의 평가손실, {data.leverage}배 기준)
+                            </div>
+                          )}
                           <div style={{ lineHeight: 1.8 }}>
                             {formatted(algorithmOf(s.name))}
                           </div>

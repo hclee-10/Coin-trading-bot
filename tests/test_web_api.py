@@ -957,6 +957,10 @@ def test_leaderboard_rows_carry_every_metric(traded_env):
     required = {
         "return_pct", "net_pnl", "trade_count", "win_rate", "stop_out_rate",
         "liquidation_risk_pct", "max_drawdown_pct", "open_positions", "started_at",
+        # 롱/숏 주문 횟수와 "청산을 버티는 데 필요했던 자본" — 무매도 적립식
+        # 실험의 핵심 지표라 화면이 반드시 받아야 한다.
+        "long_orders", "short_orders", "required_equity",
+        "position_side", "position_amount", "position_entry", "position_notional",
     }
     assert required <= set(body["strategies"][0])
 

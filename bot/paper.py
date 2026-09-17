@@ -107,6 +107,13 @@ class StrategyStats:
     worst_pnl: float = 0.0
     max_drawdown_pct: float = 0.0
     liquidation_risk_pct: float = 0.0   # 청산가까지 간 비율의 최댓값
+    long_orders: int = 0                # 롱 방향으로 낸 주문 횟수 (적립·상계 포함)
+    short_orders: int = 0               # 숏 방향으로 낸 주문 횟수
+    required_equity: float = 0.0        # 청산을 버티는 데 필요했던 최소 자기자본
+    position_side: str = ""             # 현재 순포지션 방향 (long | short | "")
+    position_amount: float = 0.0        # 현재 순포지션 수량 (베이스 코인)
+    position_entry: float = 0.0         # 현재 순포지션 평균 단가
+    position_notional: float = 0.0      # 현재 순포지션 명목가 (USDT)
     error: str | None = None
 
     @property
@@ -341,21 +348,29 @@ class PaperArena:
                 # 반대 방향 적립 = 상계. 실거래의 단방향 모드와 같은 규칙으로,
                 # 주문 금액만큼 순포지션이 줄고, 넘치면 뒤집힌다.
                 self._net_reduce(name, position, signal, price, now_ms, equity)
-            return
-
-        if signal.is_entry:
+        elif signal.is_entry:
             self._open(name, symbol, signal, price, now_ms, equity)
 
         # 최대 낙폭을 위해 고점을 갱신한다. 실현손익은 위에서 이미 집계했으므로
         # 이번 주기에 닫힌 거래만 더하면 되지만, 정확성을 위해 다시 읽는다 —
         # 주기가 15초라 비용보다 정확성이 중요하다.
-        marked = self._equity(name, account) + sum(
-            p.unrealized_net(price, self.taker_fee)
-            for (owner, _), p in self._positions.items()
-            if owner == name
-        )
+        open_now = [
+            p for (owner, _), p in self._positions.items() if owner == name
+        ]
+        unrealized = sum(p.unrealized_net(price, self.taker_fee) for p in open_now)
+        marked = self._equity(name, account) + unrealized
         if marked > account["peak_equity"]:
             self.store.update_paper_peak(name, marked)
+
+        # "얼마가 있어야 청산을 안 당했는가" — 이 실험의 핵심 답. 매 주기,
+        # 포지션 증거금(명목가/레버리지)에 그 순간의 평가손실을 더한 값이
+        # 그 순간 계좌에 있어야 했던 최소 자기자본이고, 러닝 맥스를 남긴다.
+        exposure = sum(abs(price * p.amount) for p in open_now)
+        needed = exposure / max(self.config.exchange.leverage, 1.0) + max(
+            0.0, -unrealized
+        )
+        if needed > account.get("required_equity", 0.0):
+            self.store.update_paper_required(name, needed)
 
     # ------------------------------------------------------------------
     def _settle_funding(
@@ -450,6 +465,8 @@ class PaperArena:
         # next_funding_ms 는 다음 주기의 _settle_funding 이 채운다. 방금 연
         # 포지션은 아직 정산 시각을 지나지 않았으므로 그래도 된다.
         self._save_position(name, position)
+        self._record_order(name, symbol, signal.target_side.value, price,
+                           decision.base_amount, decision.notional, now_ms, "open")
 
     def _add(
         self,
@@ -484,6 +501,8 @@ class PaperArena:
         position.notional += decision.notional
         position.entry_fee += add_fee
         self._save_position(name, position)
+        self._record_order(name, position.symbol, signal.target_side.value, price,
+                           add_amount, decision.notional, now_ms, "add")
 
     def _net_reduce(
         self,
@@ -509,6 +528,9 @@ class PaperArena:
         reduce_amount = min(decision.base_amount, position.amount)
         if reduce_amount <= 0:
             return
+        # 상계도 주문은 주문이다 — 신호 방향(반대쪽)으로 한 건 기록한다.
+        self._record_order(name, position.symbol, signal.target_side.value, price,
+                           decision.base_amount, decision.notional, now_ms, "net")
         order_fee = decision.base_amount * price * self.taker_fee
         reduce_fee = order_fee * (reduce_amount / decision.base_amount)
         portion = reduce_amount / position.amount
@@ -565,6 +587,17 @@ class PaperArena:
         position.funding_paid -= funding_part
         self._save_position(name, position)
 
+    def _record_order(
+        self, name: str, symbol: str, side: str, price: float,
+        amount: float, notional: float, now_ms: int, kind: str,
+    ) -> None:
+        """주문 한 건을 남긴다. 적립식은 주문 여러 개가 포지션 하나로 합쳐지므로
+        "롱을 몇 번, 숏을 몇 번 잡았는지" 는 여기서만 셀 수 있다."""
+        self.store.record_paper_order({
+            "strategy": name, "symbol": symbol, "ts": now_ms, "side": side,
+            "price": price, "amount": amount, "notional": notional, "kind": kind,
+        })
+
     def _save_position(self, name: str, position: PaperPosition) -> None:
         self.store.save_paper_position(name, position.symbol, {
             "side": position.side.value, "opened_at": position.opened_at,
@@ -618,6 +651,7 @@ class PaperArena:
 
         catalog = {e["name"]: e for e in strategy_catalog()}
         accounts = {a["strategy"]: a for a in self.store.paper_accounts()}
+        order_counts = self.store.paper_order_counts()
         rows: list[StrategyStats] = []
 
         for name in self._strategies:
@@ -641,6 +675,12 @@ class PaperArena:
                 total_funding=sum(t["funding"] for t in trades),
                 best_pnl=max((t["pnl"] for t in trades), default=0.0),
                 worst_pnl=min((t["pnl"] for t in trades), default=0.0),
+                long_orders=order_counts.get(name, {}).get("long", 0),
+                short_orders=order_counts.get(name, {}).get("short", 0),
+                required_equity=(
+                    account["required_equity"]
+                    if "required_equity" in account else 0.0
+                ),
                 error=self._errors.get(name),
             )
 
@@ -652,6 +692,15 @@ class PaperArena:
                 p.unrealized_net(prices.get(p.symbol, p.entry_price), self.taker_fee)
                 for p in open_positions
             )
+            if open_positions:
+                # 심볼 하나만 굴리므로 첫 포지션이 곧 순포지션이다.
+                held = open_positions[0]
+                stats.position_side = held.side.value
+                stats.position_amount = held.amount
+                stats.position_entry = held.entry_price
+                stats.position_notional = abs(
+                    prices.get(held.symbol, held.entry_price) * held.amount
+                )
 
             peak = max(account["peak_equity"], stats.equity + stats.unrealized)
             if peak > 0:
