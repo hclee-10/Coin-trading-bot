@@ -48,8 +48,27 @@ CREATE TABLE IF NOT EXISTS paper_accounts (
     strategy     TEXT PRIMARY KEY,
     start_equity REAL NOT NULL,
     started_at   INTEGER NOT NULL,
-    peak_equity  REAL NOT NULL
+    peak_equity  REAL NOT NULL,
+    -- 청산 안 당하고 버티는 데 지금까지 필요했던 최소 자기자본(러닝 맥스).
+    -- 증거금 + 최악 순간의 평가손실. 무매도 적립식 실험의 핵심 답이다.
+    required_equity REAL NOT NULL DEFAULT 0
 );
+
+-- 모의매매가 낸 개별 주문. 왕복(paper_trades)과 달리 "몇 번 롱을 잡고 몇 번
+-- 숏을 잡았는지" 를 세려면 주문 단위 기록이 필요하다 — 적립식은 주문 여러
+-- 개가 포지션 하나로 합쳐지므로 왕복 기록만으로는 복원할 수 없다.
+CREATE TABLE IF NOT EXISTS paper_orders (
+    id        INTEGER PRIMARY KEY AUTOINCREMENT,
+    strategy  TEXT NOT NULL,
+    symbol    TEXT NOT NULL,
+    ts        INTEGER NOT NULL,      -- ms
+    side      TEXT NOT NULL,         -- long | short (주문 방향)
+    price     REAL NOT NULL,
+    amount    REAL NOT NULL,
+    notional  REAL NOT NULL,
+    kind      TEXT NOT NULL          -- open | add | net
+);
+CREATE INDEX IF NOT EXISTS idx_paper_orders_strategy ON paper_orders(strategy);
 
 CREATE TABLE IF NOT EXISTS paper_trades (
     id           INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -97,6 +116,7 @@ _MIGRATIONS: tuple[tuple[str, str, str], ...] = (
     ("paper_positions", "funding_paid", "REAL NOT NULL DEFAULT 0"),
     ("paper_positions", "next_funding_ms", "INTEGER NOT NULL DEFAULT 0"),
     ("paper_positions", "take_profit", "REAL NOT NULL DEFAULT 0"),
+    ("paper_accounts", "required_equity", "REAL NOT NULL DEFAULT 0"),
 )
 
 
@@ -267,6 +287,7 @@ class Store:
                 return {
                     "strategy": strategy, "start_equity": start_equity,
                     "started_at": now_ms, "peak_equity": start_equity,
+                    "required_equity": 0.0,
                 }
             return dict(row)
 
@@ -275,6 +296,16 @@ class Store:
             self._db.execute(
                 "UPDATE paper_accounts SET peak_equity = ? WHERE strategy = ?",
                 (peak_equity, strategy),
+            )
+            self._db.commit()
+
+    def update_paper_required(self, strategy: str, required_equity: float) -> None:
+        """청산을 버티는 데 필요했던 자기자본의 러닝 맥스를 갱신한다."""
+        with self._lock:
+            self._db.execute(
+                "UPDATE paper_accounts SET required_equity = ?"
+                " WHERE strategy = ? AND required_equity < ?",
+                (required_equity, strategy, required_equity),
             )
             self._db.commit()
 
@@ -339,6 +370,29 @@ class Store:
             )
             self._db.commit()
 
+    def record_paper_order(self, order: dict[str, Any]) -> None:
+        """모의매매 주문 한 건. 롱/숏을 몇 번 잡았는지 세는 데 쓴다."""
+        with self._lock:
+            self._db.execute(
+                "INSERT INTO paper_orders (strategy, symbol, ts, side, price,"
+                " amount, notional, kind) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (order["strategy"], order["symbol"], order["ts"], order["side"],
+                 order["price"], order["amount"], order["notional"], order["kind"]),
+            )
+            self._db.commit()
+
+    def paper_order_counts(self) -> dict[str, dict[str, int]]:
+        """전략별 롱/숏 주문 횟수. {전략: {"long": n, "short": n}}"""
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT strategy, side, COUNT(*) AS n FROM paper_orders"
+                " GROUP BY strategy, side"
+            ).fetchall()
+        out: dict[str, dict[str, int]] = {}
+        for r in rows:
+            out.setdefault(r["strategy"], {"long": 0, "short": 0})[r["side"]] = r["n"]
+        return out
+
     def paper_trades(self, strategy: str | None = None, limit: int = 2000) -> list[dict[str, Any]]:
         query = "SELECT * FROM paper_trades"
         params: list[Any] = []
@@ -353,7 +407,8 @@ class Store:
     def reset_paper(self) -> None:
         """모의매매 기록을 전부 지운다. 조건을 바꿔 다시 비교할 때 쓴다."""
         with self._lock:
-            for table in ("paper_trades", "paper_positions", "paper_accounts"):
+            for table in ("paper_trades", "paper_positions", "paper_accounts",
+                          "paper_orders"):
                 self._db.execute(f"DELETE FROM {table}")
             self._db.commit()
 

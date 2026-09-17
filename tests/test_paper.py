@@ -488,6 +488,56 @@ def test_same_side_entry_without_pyramid_flag_is_ignored():
     assert position.amount == pytest.approx(1.0)   # 그대로 1차분만
 
 
+# --- 주문 방향별 횟수 --------------------------------------------------------
+def test_orders_are_counted_by_direction():
+    """적립식은 주문 여러 개가 포지션 하나로 합쳐진다 — 왕복 수만 보면 롱을
+    몇 번, 숏을 몇 번 잡았는지 안 보이므로 주문 단위로 세야 한다."""
+    acc_long = Signal(action=SignalAction.ENTER_LONG, strength=0.25,
+                      stop_loss=2.0, metadata={"accumulate": True}, reason="적립")
+    acc_short = Signal(action=SignalAction.ENTER_SHORT, strength=0.25,
+                       stop_loss=500.0, metadata={"accumulate": True}, reason="상계")
+    strategy = Scripted("dca", [acc_long, acc_long, acc_short, HOLD])
+    arena = arena_with({"dca": strategy}, notional_tiers=[100.0],
+                       max_position_notional_pct=1000.0)
+
+    arena.step(SYMBOL, bars(100.0), tick(100.0))   # 롱 진입
+    arena.step(SYMBOL, bars(90.0), tick(90.0))     # 롱 적립
+    arena.step(SYMBOL, bars(95.0), tick(95.0))     # 숏 상계
+
+    (row,) = arena.leaderboard({SYMBOL: 95.0})
+    assert row.long_orders == 2
+    assert row.short_orders == 1
+    # 현재 순포지션도 방향·수량·평단으로 보여야 "보유 1" 보다 읽힌다
+    assert row.position_side == "long"
+    assert row.position_amount > 0
+    assert row.position_entry > 0
+
+
+def test_order_counts_are_wiped_by_reset():
+    arena = arena_with({"s": Scripted("s", [LONG, EXIT])})
+    arena.step(SYMBOL, bars(100.0), tick(100.0))
+
+    arena.reset()
+
+    assert arena.store.paper_order_counts() == {}
+
+
+# --- 청산을 버티는 데 필요했던 자본 ------------------------------------------
+def test_required_equity_records_the_worst_moment():
+    """"얼마가 있어야 청산을 안 당했는가" — 증거금 + 최악 순간의 평가손실을
+    러닝 맥스로 남긴다. 가격이 회복돼도 최악의 순간은 잊지 않는다."""
+    strategy = Scripted("s", [LONG, HOLD, HOLD])
+    arena = arena_with({"s": strategy}, default_stop_loss_pct=90.0)
+
+    arena.step(SYMBOL, bars(100.0), tick(100.0))   # 롱 1코인 @100 (3배 레버리지)
+    arena.step(SYMBOL, bars(80.0), tick(80.0))     # 평가손실 20
+    arena.step(SYMBOL, bars(100.0), tick(100.0))   # 회복
+
+    (row,) = arena.leaderboard({SYMBOL: 100.0})
+    # 최악 순간(80): 증거금 80/3 + 손실 20 ≈ 46.67. 회복 후에도 유지된다.
+    assert row.required_equity == pytest.approx(80.0 / 3.0 + 20.0, rel=0.01)
+
+
 # --- 상계 (반대 방향 적립) ---------------------------------------------------
 def test_opposite_accumulate_reduces_the_position_and_realizes_pnl():
     """롱 2코인 보유 중 반대 적립 1코인 → 1코인만 남고, 줄어든 몫은 실현된다."""
