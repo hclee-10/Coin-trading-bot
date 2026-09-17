@@ -15,10 +15,12 @@
 * `dca_pct`     — 고정 % 기준: 3봉 누적 변화가 1.5% 이상
 * `dca_channel` — 범위 기준: 직전 20봉 최고가 돌파(급등) / 최저가 이탈(급락)
 
-같은 방향 추가 진입(적립)은 모의매매 전용이다 — 실거래 실행기는 첫 진입만
-받는다. 시스템 규칙상 진입에는 손절가가 반드시 붙어야 해서 명목상의 손절을
-달았지만, 롱은 -98%, 숏은 +200% 지점이라 사실상 도달하지 않는다(3배 레버리지
-격리라면 그 훨씬 전에 강제청산 가격이다 — 그 지점이 바로 이 실험이 재려는 값).
+실거래에서도 같은 방식으로 동작한다 — 실행기의 넷 적립 모드가 방향과 무관하게
+고정 금액 시장가 주문 하나만 내고, 단방향(one-way) 모드에서 같은 방향은 쌓이고
+반대 방향은 자동 상계된다(순포지션 감소/역전). 보호주문은 걸지 않는다. 시스템
+규칙상 신호에는 손절가가 붙어야 해서 명목값(롱 -98% / 숏 +200%)을 달았지만
+실거래에는 손절 주문이 나가지 않고, 사실상 도달하지도 않는다 — 레버리지
+격리라면 그 훨씬 전이 강제청산 가격이고, 크로스라면 계좌 전체가 증거금이다.
 """
 
 from __future__ import annotations
@@ -28,21 +30,20 @@ from bot.models import Candle, Conviction, PositionSide, Signal, SignalAction
 from bot.strategies.base import Strategy, StrategyContext, register_strategy
 
 _DESCRIPTION_COMMON = """
-급변이 오면 그 반대 방향으로 회당 고정 금액(최소 확신 = `notional_tiers` 첫 칸,
-10달러로 하려면 `[10, ...]`)을 적립한다. 보유 중에 같은 판단의 급변이 또 오면
-같은 금액을 또 추가해 평균 단가를 끌어온다. **매도는 없다** — 익절도 손절
-청산도 하지 않고, 반대 방향 급변에도 뒤집지 않는다(뒤집으면 모아 온 평균
-단가가 사라진다). 명목상의 손절(롱 -98% / 숏 +200%)은 시스템 규칙을 지키기
-위한 것으로 사실상 도달하지 않는다.
+급변이 오면 그 반대 방향으로 회당 고정 금액(기본 `notional_tiers` = 10달러)을
+주문한다 — 보유 여부와 무관하게, 급등이면 숏 10달러, 급락이면 롱 10달러다.
+같은 방향이면 수량이 쌓여 평균 단가를 끌어오고, 반대 방향이면 순포지션이
+상계된다(추세가 길수록 반대쪽 주문이 쌓여 순포지션이 줄거나 뒤집힌다).
+**청산 신호는 없다** — 익절도 손절 청산도 내지 않는다. 명목상의 손절
+(롱 -98% / 숏 +200%)은 시스템 규칙용일 뿐 실거래에 주문으로 나가지 않는다.
 
 이 전략의 목적은 수익이 아니라 **관찰**이다: 순위표의 미실현 손익·최대 낙폭·
 청산위험이 "10달러씩 이 기준으로 사 모으면 추세장에서 얼마까지 물리는가"를
 수수료·펀딩비 포함으로 보여 준다. 그 최대치가 이 방식에 필요한 실탄이다.
 
-⚠️ 실거래로 돌리면 안 된다. 실행기가 적립(추가 진입)을 지원하지 않아 반쪽으로
-동작하고, 지원하더라도 이 구조는 추세장 한 번에 계좌를 소진한다. 적립 한도
-(자기자본 대비 노출, 기본 10배)에 닿으면 더 추가하지 않는다 — 그 시점이면
-이미 개념상 청산이다.
+⚠️ 실거래로 돌리면 이 구조는 추세장 한 번에 계좌를 소진할 수 있다 — 관찰
+실험임을 인지하고 잃어도 되는 금액으로만 쓸 것. 노출을 늘리는 쪽 적립은 한도
+(자기자본 대비 노출, 기본 10배)에서 멈추고, 상계(반대 방향)는 항상 허용된다.
 """
 
 
@@ -74,35 +75,36 @@ class _AccumulateBase(Strategy):
         price = candles[-1].close
         spike = self._spike(candles)
 
-        if ctx.position.is_open:
-            long_side = ctx.position.side is PositionSide.LONG
-            adds = spike is not None and (
-                (long_side and spike[0] == -1) or (not long_side and spike[0] == 1)
-            )
-            if adds:
-                exposure_cap = ctx.equity * self.max_exposure_pct / 100
-                if ctx.position.notional >= exposure_cap:
-                    return Signal(reason=f"적립 한도 도달 (노출 {ctx.position.notional:.0f})")
-                return Signal(
-                    action=SignalAction.ENTER_LONG if long_side else SignalAction.ENTER_SHORT,
-                    strength=Conviction.LOW.value,
-                    stop_loss=self._nominal_stop(price, ctx.position.side),
-                    metadata={"pyramid": True},
-                    reason=f"{spike[1]} — 적립 (평단 {ctx.position.entry_price or price:.6g})",
-                )
-            # 매도는 없다 — 유리한 급변에도, 평단 회복에도 들고만 있는다.
-            return Signal(reason=f"적립 유지 (평단 {ctx.position.entry_price or price:.6g})")
-
         if spike is None:
+            if ctx.position.is_open:
+                return Signal(reason=f"적립 유지 (평단 {ctx.position.entry_price or price:.6g})")
             return Signal(reason="급변 없음")
 
+        # 급변이 왔다 — 보유 여부·방향과 무관하게 반대쪽으로 고정 금액 하나.
+        # 같은 방향이면 수량이 쌓이고(물타기), 반대 방향이면 단방향 모드에서
+        # 자동으로 상계된다(순포지션 감소/역전). 매도 신호는 영원히 없다.
         direction, label = spike
         side = PositionSide.SHORT if direction == 1 else PositionSide.LONG
+
+        if ctx.position.is_open and ctx.position.side is side:
+            # 노출을 '늘리는' 쪽만 한도를 본다. 상계(반대 방향)는 항상 허용 —
+            # 노출을 줄이는 주문을 막을 이유가 없다.
+            exposure_cap = ctx.equity * self.max_exposure_pct / 100
+            if ctx.position.notional >= exposure_cap:
+                return Signal(reason=f"적립 한도 도달 (노출 {ctx.position.notional:.0f})")
+
+        if ctx.position.is_open:
+            effect = "적립" if ctx.position.side is side else "상계"
+            reason = f"{label} — {'숏' if direction == 1 else '롱'} {effect} "                      f"(평단 {ctx.position.entry_price or price:.6g})"
+        else:
+            reason = f"{label} — {'숏' if direction == 1 else '롱'} 적립 시작"
+
         return Signal(
             action=SignalAction.ENTER_SHORT if direction == 1 else SignalAction.ENTER_LONG,
             strength=Conviction.LOW.value,
             stop_loss=self._nominal_stop(price, side),
-            reason=f"{label} — {'숏' if direction == 1 else '롱'} 적립 시작",
+            metadata={"accumulate": True},
+            reason=reason,
         )
 
     @staticmethod
@@ -125,13 +127,14 @@ class DcaAtrStrategy(_AccumulateBase):
 **급변 판정**  |종가 − 3봉 전 종가| ≥ ATR14 × 2.0, 직전 봉 기준으로는 문턱
 아래였다가 이번 봉에 넘어선 순간만 (같은 급변에 두 번 반응하지 않음)
 
-**진입/적립**  급변의 반대 방향으로 최소 확신(LOW = notional_tiers 첫 금액).
-보유 중 같은 판단의 급변마다 같은 금액 추가 (모의매매 전용, 평균 단가 갱신).
+**주문**  급변의 반대 방향으로 회당 고정 금액(notional_tiers, 기본 10달러)
+시장가 하나 — 보유 여부와 무관. 같은 방향은 적립(평단 갱신), 반대 방향은
+상계(순포지션 감소/역전). 보호주문 없음.
 
-**매도 없음**  익절·손절 청산·역전환 전부 하지 않는다. 명목 손절(롱 -98% /
-숏 +200%)만 시스템 규칙용으로 붙인다.
+**청산 신호 없음**  익절·손절 청산 전부 내지 않는다. 명목 손절(롱 -98% /
+숏 +200%)은 시스템 규칙용이며 주문으로 나가지 않는다.
 
-**적립 한도**  노출이 자기자본 × 1000% 에 닿으면 중단 (그 시점이면 개념상 청산).
+**적립 한도**  노출을 늘리는 쪽만 자기자본 × 1000% 에서 중단. 상계는 항상 허용.
 
 **파라미터**  `spike_atr`(2.0), `lookback`(3), `max_exposure_pct`(1000)
 """
@@ -170,13 +173,13 @@ class DcaPctStrategy(_AccumulateBase):
 **급변 판정**  |종가 ÷ 3봉 전 종가 − 1| ≥ 1.5%, 직전 봉 기준으로는 문턱
 아래였다가 이번 봉에 넘어선 순간만
 
-**진입/적립**  급변의 반대 방향으로 최소 확신(LOW = notional_tiers 첫 금액).
-보유 중 같은 판단의 급변마다 같은 금액 추가 (모의매매 전용, 평균 단가 갱신).
+**주문**  급변의 반대 방향으로 회당 고정 금액(notional_tiers, 기본 10달러)
+시장가 하나 — 보유 여부와 무관. 같은 방향은 적립, 반대 방향은 상계. 보호주문
+없음. 순위표의 미실현·최대 낙폭이 관찰값이다.
 
-**매도 없음**  익절·손절 청산·역전환 전부 하지 않는다. 명목 손절(롱 -98% /
-숏 +200%)만 시스템 규칙용으로 붙인다. 순위표의 미실현·최대 낙폭이 관찰값이다.
+**청산 신호 없음**  익절·손절 청산 전부 내지 않는다.
 
-**적립 한도**  노출이 자기자본 × 1000% 에 닿으면 중단.
+**적립 한도**  노출을 늘리는 쪽만 자기자본 × 1000% 에서 중단. 상계는 항상 허용.
 
 **파라미터**  `spike_pct`(1.5), `lookback`(3), `max_exposure_pct`(1000)
 """
@@ -219,13 +222,13 @@ class DcaChannelStrategy(_AccumulateBase):
 **급변 판정**  종가 > 직전 20봉 최고가 → 급등 / 종가 < 직전 20봉 최저가 → 급락.
 직전 봉은 채널 안이었어야 한다 (돌파 순간만).
 
-**진입/적립**  급변의 반대 방향으로 최소 확신(LOW = notional_tiers 첫 금액).
-보유 중 같은 판단의 급변마다 같은 금액 추가 (모의매매 전용, 평균 단가 갱신).
+**주문**  급변의 반대 방향으로 회당 고정 금액(notional_tiers, 기본 10달러)
+시장가 하나 — 보유 여부와 무관. 같은 방향은 적립, 반대 방향은 상계. 보호주문
+없음. 순위표의 미실현·최대 낙폭이 관찰값이다.
 
-**매도 없음**  익절·손절 청산·역전환 전부 하지 않는다. 명목 손절(롱 -98% /
-숏 +200%)만 시스템 규칙용으로 붙인다. 순위표의 미실현·최대 낙폭이 관찰값이다.
+**청산 신호 없음**  익절·손절 청산 전부 내지 않는다.
 
-**적립 한도**  노출이 자기자본 × 1000% 에 닿으면 중단.
+**적립 한도**  노출을 늘리는 쪽만 자기자본 × 1000% 에서 중단. 상계는 항상 허용.
 
 **파라미터**  `period`(20), `max_exposure_pct`(1000)
 """

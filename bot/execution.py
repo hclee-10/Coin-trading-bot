@@ -46,13 +46,13 @@ class ExecutionResult:
     """한 심볼에 대한 이번 주기의 처리 결과."""
 
     symbol: str
-    action: str            # "none" | "entered" | "exited" | "reversed" | "rejected"
+    action: str            # "none" | "entered" | "accumulated" | "exited" | "reversed" | "rejected"
     detail: str = ""
     orders: list[str] = field(default_factory=list)  # 전송한 주문 id (dry-run 은 비어 있음)
 
     @property
     def traded(self) -> bool:
-        return self.action in ("entered", "exited", "reversed")
+        return self.action in ("entered", "accumulated", "exited", "reversed")
 
 
 class Executor:
@@ -175,6 +175,13 @@ class Executor:
 
         # 여기부터는 진입 신호
         target = signal.target_side
+
+        # 넷 적립 신호: 방향과 무관하게 고정 금액 주문 하나만 낸다. 같은 방향이면
+        # 수량이 쌓이고, 반대 방향이면 단방향 모드에서 자동으로 상계된다(줄거나
+        # 뒤집힘). 보호주문은 걸지 않는다 — 무매도 적립식의 계약이다.
+        if signal.metadata.get("accumulate"):
+            return self._accumulate(symbol, signal, position, price, equity)
+
         if position.is_open:
             if position.side is target:
                 return ExecutionResult(
@@ -204,6 +211,64 @@ class Executor:
             )
 
         return self._open(symbol, signal, price, equity, open_positions)
+
+    # ------------------------------------------------------------------
+    def _accumulate(
+        self, symbol: str, signal: Signal, position: Position, price: float, equity: float
+    ) -> ExecutionResult:
+        """넷 적립 주문 — 항상 시장가, 항상 고정 금액, 보호주문 없음.
+
+        단방향(one-way) 모드에서는 반대 방향 주문이 자동으로 기존 포지션을
+        상계하므로, 여기서는 청산/뒤집기를 따로 처리하지 않고 주문만 낸다.
+        미체결 지정가 대기와 섞이지 않도록 시장가만 쓴다.
+        """
+        market = self.exchange.market(symbol)
+        # 적립은 같은 포지션에 쌓거나 상계하는 것이므로 동시 보유 한도와
+        # 무관하다 — open_positions=0 으로 평가한다.
+        decision = self.risk.evaluate_entry(
+            signal=signal, entry_price=price, equity=equity,
+            open_positions=0, min_notional=market.min_notional,
+        )
+        if not decision.approved:
+            return ExecutionResult(symbol, "rejected", decision.reason)
+
+        amount = self.exchange.base_to_contracts(symbol, decision.base_amount)
+        if amount <= 0:
+            return ExecutionResult(
+                symbol, "rejected",
+                f"수량을 거래소 규격에 맞추면 0이 됩니다 (요청 {decision.base_amount:.8f})",
+            )
+        if market.min_amount is not None and amount < market.min_amount:
+            return ExecutionResult(
+                symbol, "rejected",
+                f"수량 {amount} 이 최소 주문수량 {market.min_amount} 미만입니다",
+            )
+
+        side = Side.BUY if signal.target_side is PositionSide.LONG else Side.SELL
+        if not position.is_open:
+            effect = "적립 시작"
+        elif position.side is signal.target_side:
+            effect = "같은 방향 적립"
+        else:
+            effect = "반대 방향 상계"
+        summary = (
+            f"{signal.target_side.value} 시장가 {amount} @ ~{price} — {effect} "
+            f"({signal.reason or decision.reason})"
+        )
+
+        if self.dry_run:
+            log.info("[DRY-RUN] %s %s", symbol, summary)
+            return ExecutionResult(
+                symbol, "entered" if not position.is_open else "accumulated",
+                f"[DRY-RUN] {summary}",
+            )
+
+        order = self.exchange.create_market_order(symbol, side, amount)
+        log.info("%s 적립 주문: %s", symbol, summary)
+        return ExecutionResult(
+            symbol, "entered" if not position.is_open else "accumulated",
+            summary, [order.id] if order.id else [],
+        )
 
     # ------------------------------------------------------------------
     def _open(

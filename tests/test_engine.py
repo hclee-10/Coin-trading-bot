@@ -41,7 +41,7 @@ def make_config(**trading_overrides) -> Config:
         exchange=ExchangeConfig(id="okx", leverage=3.0),
         trading=trading,
         strategy=StrategyConfig(name="hold"),
-        risk=RiskConfig(max_position_notional_pct=100.0),
+        risk=RiskConfig(max_position_notional_pct=100.0, max_daily_loss_pct=3.0),
     )
 
 
@@ -51,7 +51,7 @@ def test_prepare_sets_leverage_for_each_symbol():
 
     engine.prepare()
 
-    assert ex.leverage_calls == [(SYMBOL, 3.0, "isolated")]
+    assert ex.leverage_calls == [(SYMBOL, 3.0, "cross")]
 
 
 def test_cycle_routes_entry_signal_to_orders():

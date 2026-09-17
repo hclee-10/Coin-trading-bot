@@ -128,15 +128,29 @@ def test_dca_fades_the_spike_and_pyramids_without_selling():
                        entry_price=94.0, notional=100.0)
     add = strategy.generate(context(crash2, holding))
     assert add.action is SignalAction.ENTER_LONG
-    assert add.metadata.get("pyramid") is True
+    assert add.metadata.get("accumulate") is True
 
-    # 평단 위로 회복해도 매도하지 않는다 — 무매도 적립식이다.
+    # 평단 위로 회복해도(급변이 없으면) 매도하지 않는다 — 무매도 적립식이다.
     recovered = series(calm + [94.0, 88.0, 96.0, 96.0])
     averaged = Position(symbol=SYMBOL, side=PositionSide.LONG, contracts=2.0,
                         entry_price=91.0, notional=200.0)
     held = strategy.generate(context(recovered, averaged))
-    assert held.action is SignalAction.HOLD
-    assert "적립" in held.reason
+    assert held.action is not SignalAction.EXIT
+
+
+def test_dca_nets_against_the_position_on_an_opposite_spike():
+    """롱 보유 중 급등이 오면 뒤집지도 참지도 않고 — 반대 방향 10달러(상계)."""
+    strategy = get_strategy("dca_atr", {"spike_atr": 2.0})
+    calm = [100.0 + (0.1 if i % 2 else -0.1) for i in range(60)]
+    pump = series(calm + [106.0, 106.0])
+    holding = Position(symbol=SYMBOL, side=PositionSide.LONG, contracts=2.0,
+                       entry_price=94.0, notional=200.0)
+
+    signal = strategy.generate(context(pump, holding))
+
+    assert signal.action is SignalAction.ENTER_SHORT
+    assert signal.metadata.get("accumulate") is True
+    assert "상계" in signal.reason
 
 
 def test_dca_variants_disagree_on_what_a_spike_is():

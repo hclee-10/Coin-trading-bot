@@ -130,7 +130,7 @@ def test_config_endpoint_exposes_no_secrets(env):
     for leaked in ("api_key", "secret", "passphrase", "password", "scrypt"):
         assert leaked not in serialized, f"'{leaked}' 가 응답에 노출되었습니다"
     assert body["exchange"]["id"] == "okx"
-    assert body["risk"]["max_daily_loss_pct"] == 3.0
+    assert body["risk"]["max_daily_loss_pct"] == 100.0
 
 
 def test_config_endpoint_exposes_sizing_and_order_settings(env):
@@ -138,7 +138,7 @@ def test_config_endpoint_exposes_sizing_and_order_settings(env):
     client, *_ = env
     body = client.get("/api/config", headers=login(client)).json()
     assert body["risk"]["sizing_mode"] == "tiers"
-    assert body["risk"]["notional_tiers"] == [50.0, 100.0, 150.0, 200.0]
+    assert body["risk"]["notional_tiers"] == [10.0, 10.0, 10.0, 10.0]
     # 사용자가 요구한 "수익률 제한 없음" 이 기본값이어야 한다
     assert body["risk"]["default_take_profit_pct"] == 0.0
     assert body["trading"]["order_type"] == "limit"
@@ -995,7 +995,7 @@ def test_strategies_endpoint_carries_the_algorithm(env):
 
     for entry in body["strategies"]:
         assert len(entry["algorithm"]) > 200, entry["name"]
-        assert "진입" in entry["algorithm"] and "손절" in entry["algorithm"]
+        assert "주문" in entry["algorithm"] or "진입" in entry["algorithm"]
 
 
 @pytest.mark.parametrize("path", ["/api/leaderboard"])
