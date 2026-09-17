@@ -70,7 +70,7 @@ class Credentials:
 @dataclass
 class ExchangeConfig:
     id: str = "okx"
-    margin_mode: str = "isolated"  # isolated | cross
+    margin_mode: str = "cross"  # isolated | cross
     leverage: float = 3.0
     hedge_mode: bool = False  # 이 봇은 단방향(one-way) 모드만 지원한다
     request_timeout_ms: int = 15_000
@@ -135,7 +135,7 @@ class TradingConfig:
 
 @dataclass
 class StrategyConfig:
-    name: str = "hold"
+    name: str = "dca_atr"
     params: dict[str, Any] = field(default_factory=dict)
 
 
@@ -145,13 +145,18 @@ class RiskConfig:
     # risk   : 손절까지의 거리에서 수량을 역산한다 (risk_per_trade_pct 사용).
     sizing_mode: str = "tiers"
     # 확신도 낮음 → 높음 순서. 전략이 낸 확신도가 이 중 하나로 매핑된다.
-    notional_tiers: list[float] = field(default_factory=lambda: [50.0, 100.0, 150.0, 200.0])
+    # 무매도 적립식 기준: 확신도와 무관하게 회당 10달러.
+    notional_tiers: list[float] = field(default_factory=lambda: [10.0, 10.0, 10.0, 10.0])
 
     risk_per_trade_pct: float = 0.5      # 손절까지 갔을 때 잃을 자기자본 비율(%)
-    max_position_notional_pct: float = 20.0  # 자기자본 대비 포지션 명목가 상한(%)
+    # 적립식이 노출을 쌓을 수 있게 상한을 사실상 연다. 실제 제동은 전략의
+    # max_exposure_pct(자기자본 10배)와 거래소 증거금이 맡는다.
+    max_position_notional_pct: float = 1000.0
     max_leverage: float = 5.0
     max_open_positions: int = 2
-    max_daily_loss_pct: float = 3.0      # 일일 손실이 이 값을 넘으면 킬스위치
+    # 킬스위치가 적립 도중 진입을 막지 않게 사실상 끈다(100% = 전액).
+    # 보호가 필요하면 CONFIG_YAML 에서 낮춰라.
+    max_daily_loss_pct: float = 100.0
     min_order_notional: float = 5.0      # 이보다 작은 주문은 보내지 않는다
     default_stop_loss_pct: float = 1.0   # 전략이 손절가를 안 주면 사용
     default_take_profit_pct: float = 0.0  # 0 이면 익절을 걸지 않는다 (수익률 제한 없음)

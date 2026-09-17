@@ -486,3 +486,50 @@ def test_same_side_entry_without_pyramid_flag_is_ignored():
 
     position = arena._positions[("plain", SYMBOL)]
     assert position.amount == pytest.approx(1.0)   # 그대로 1차분만
+
+
+# --- 상계 (반대 방향 적립) ---------------------------------------------------
+def test_opposite_accumulate_reduces_the_position_and_realizes_pnl():
+    """롱 2코인 보유 중 반대 적립 1코인 → 1코인만 남고, 줄어든 몫은 실현된다."""
+    open_long = Signal(action=SignalAction.ENTER_LONG, strength=0.25,
+                       stop_loss=2.0, metadata={"accumulate": True}, reason="적립")
+    net_short = Signal(action=SignalAction.ENTER_SHORT, strength=0.25,
+                       stop_loss=500.0, metadata={"accumulate": True}, reason="상계")
+    strategy = Scripted("net", [open_long, net_short, HOLD])
+    arena = arena_with({"net": strategy}, notional_tiers=[200.0],
+                       max_position_notional_pct=1000.0)
+
+    arena.step(SYMBOL, bars(100.0), tick(100.0))   # 롱 2코인 @100
+    arena.step(SYMBOL, bars(110.0), tick(110.0))   # 반대 적립 200/110 ≈ 1.818코인
+
+    position = arena._positions[("net", SYMBOL)]
+    assert position.side.value == "long"
+    assert position.amount == pytest.approx(2.0 - 200.0 / 110.0)
+    trades = arena.store.paper_trades("net")
+    assert len(trades) == 1
+    assert trades[0]["exit_reason"] == "net"
+    assert trades[0]["pnl"] > 0   # 100 → 110 상승분 실현
+
+
+def test_opposite_accumulate_flips_when_it_exceeds_the_position():
+    """보유보다 큰 반대 적립은 전량 상계 후 남는 수량으로 뒤집힌다."""
+    open_long = Signal(action=SignalAction.ENTER_LONG, strength=0.25,
+                       stop_loss=2.0, metadata={"accumulate": True}, reason="적립")
+    net_short = Signal(action=SignalAction.ENTER_SHORT, strength=0.25,
+                       stop_loss=500.0, metadata={"accumulate": True}, reason="상계")
+    strategy = Scripted("flip", [open_long, net_short, HOLD])
+    store = Store(None)
+    arena = PaperArena(
+        make_config(notional_tiers=[100.0], max_position_notional_pct=1000.0),
+        store, taker_fee=0.0, strategies={"flip": strategy},
+    )
+
+    arena.step(SYMBOL, bars(100.0), tick(100.0))   # 롱 1코인 @100
+    # 두 번째 주문도 100 USDT 지만 가격이 50 → 2코인 숏 = 1코인 숏으로 뒤집힘
+    arena.step(SYMBOL, bars(50.0), tick(50.0))
+
+    position = arena._positions[("flip", SYMBOL)]
+    assert position.side.value == "short"
+    assert position.amount == pytest.approx(1.0)
+    trades = arena.store.paper_trades("flip")
+    assert len(trades) == 1 and trades[0]["exit_reason"] == "net"

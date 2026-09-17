@@ -316,19 +316,31 @@ class PaperArena:
         if position is not None:
             if signal.action is SignalAction.EXIT:
                 self._close(name, position, price, now_ms, "signal")
-            elif signal.is_entry and signal.target_side is not position.side:
+            elif (
+                signal.is_entry
+                and signal.target_side is not position.side
+                and not signal.metadata.get("accumulate")
+            ):
                 # 방향이 뒤집혔다 — 닫고 새로 연다.
                 self._close(name, position, price, now_ms, "reverse")
                 self._open(name, symbol, signal, price, now_ms, equity)
             elif (
                 signal.is_entry
                 and signal.target_side is position.side
-                and signal.metadata.get("pyramid")
+                and (signal.metadata.get("accumulate") or signal.metadata.get("pyramid"))
             ):
                 # 같은 방향 추가 진입(적립·물타기). 전략이 metadata 로 명시할
                 # 때만 허용한다 — 일반 전략의 중복 진입 신호가 적립이 되면
                 # 안 된다. 평균 단가와 수량이 합쳐진다.
                 self._add(name, position, signal, price, now_ms, equity)
+            elif (
+                signal.is_entry
+                and signal.target_side is not position.side
+                and signal.metadata.get("accumulate")
+            ):
+                # 반대 방향 적립 = 상계. 실거래의 단방향 모드와 같은 규칙으로,
+                # 주문 금액만큼 순포지션이 줄고, 넘치면 뒤집힌다.
+                self._net_reduce(name, position, signal, price, now_ms, equity)
             return
 
         if signal.is_entry:
@@ -471,6 +483,86 @@ class PaperArena:
         position.amount = total_amount
         position.notional += decision.notional
         position.entry_fee += add_fee
+        self._save_position(name, position)
+
+    def _net_reduce(
+        self,
+        name: str,
+        position: PaperPosition,
+        signal: Signal,
+        price: float,
+        now_ms: int,
+        equity: float,
+    ) -> None:
+        """반대 방향 적립 주문으로 포지션을 상계한다.
+
+        주문 금액이 보유 수량보다 작으면 그만큼만 줄이고(부분 실현), 크면 전량
+        청산 후 남는 수량으로 반대 포지션을 연다 — 실거래 단방향 모드의 넷팅과
+        같은 규칙이다. 줄어든 부분의 진입 수수료·펀딩비는 비례로 함께 실현한다.
+        """
+        decision = self.risk.evaluate_entry(
+            signal=signal, entry_price=price, equity=equity, open_positions=0
+        )
+        if not decision.approved:
+            return
+
+        reduce_amount = min(decision.base_amount, position.amount)
+        if reduce_amount <= 0:
+            return
+        order_fee = decision.base_amount * price * self.taker_fee
+        reduce_fee = order_fee * (reduce_amount / decision.base_amount)
+        portion = reduce_amount / position.amount
+
+        direction = 1 if position.side is PositionSide.LONG else -1
+        gross = (price - position.entry_price) * reduce_amount * direction
+        entry_fee_part = position.entry_fee * portion
+        funding_part = position.funding_paid * portion
+        self.store.record_paper_trade({
+            "strategy": name,
+            "symbol": position.symbol,
+            "side": position.side.value,
+            "opened_at": position.opened_at,
+            "closed_at": now_ms,
+            "entry_price": position.entry_price,
+            "exit_price": price,
+            "amount": reduce_amount,
+            "notional": position.notional * portion,
+            "pnl": gross - reduce_fee - entry_fee_part - funding_part,
+            "fee": reduce_fee + entry_fee_part,
+            "funding": funding_part,
+            "exit_reason": "net",
+            "conviction": position.conviction,
+            "worst_excursion_pct": max(
+                position.worst_excursion_pct, position.excursion_pct(price)
+            ),
+        })
+
+        remainder = decision.base_amount - reduce_amount
+        if portion >= 1.0:
+            # 전량 상계됐다. 남는 수량이 있으면 반대 포지션으로 뒤집힌다.
+            self._positions.pop((name, position.symbol), None)
+            self.store.delete_paper_position(name, position.symbol)
+            if remainder * price >= 1.0:   # 1 USDT 미만의 부스러기는 무시
+                flipped = PaperPosition(
+                    symbol=position.symbol,
+                    side=signal.target_side,
+                    opened_at=now_ms,
+                    entry_price=price,
+                    amount=remainder,
+                    notional=remainder * price,
+                    stop_loss=decision.stop_loss,
+                    entry_fee=order_fee - reduce_fee,
+                    conviction=signal.strength,
+                    take_profit=decision.take_profit or 0.0,
+                )
+                self._positions[(name, position.symbol)] = flipped
+                self._save_position(name, flipped)
+            return
+
+        position.amount -= reduce_amount
+        position.notional *= 1 - portion
+        position.entry_fee -= entry_fee_part
+        position.funding_paid -= funding_part
         self._save_position(name, position)
 
     def _save_position(self, name: str, position: PaperPosition) -> None:

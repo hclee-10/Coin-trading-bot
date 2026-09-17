@@ -174,3 +174,48 @@ def test_rejected_when_size_rounds_to_zero():
 
     assert result.action == "rejected"
     assert ex.sent_orders == []
+
+
+# --- 넷 적립 (accumulate) ---------------------------------------------------
+ACC_LONG = Signal(action=SignalAction.ENTER_LONG, strength=0.25,
+                  stop_loss=2.0, metadata={"accumulate": True}, reason="적립")
+ACC_SHORT = Signal(action=SignalAction.ENTER_SHORT, strength=0.25,
+                   stop_loss=300.0, metadata={"accumulate": True}, reason="상계")
+
+
+def test_accumulate_adds_to_the_same_side_without_protective_orders():
+    """같은 방향 적립은 시장가 하나만 — 손절/익절 보호주문이 나가면 안 된다."""
+    ex = FakeExchange(price=100.0)
+    executor = make_executor(ex, notional_tiers=[10.0], max_position_notional_pct=1000.0)
+
+    result = executor.handle(symbol=SYMBOL, signal=ACC_LONG, position=long_position(),
+                             price=100.0, equity=10_000.0, open_positions=1)
+
+    assert result.action == "accumulated"
+    assert [o.type for o in ex.sent_orders] == ["market"]
+    assert ex.sent_orders[0].side is Side.BUY
+
+
+def test_accumulate_nets_the_opposite_side_instead_of_reversing():
+    """반대 방향 적립은 전량 청산+뒤집기가 아니라 10달러짜리 주문 하나다."""
+    ex = FakeExchange(price=100.0)
+    executor = make_executor(ex, notional_tiers=[10.0], max_position_notional_pct=1000.0)
+
+    result = executor.handle(symbol=SYMBOL, signal=ACC_SHORT, position=long_position(5.0),
+                             price=100.0, equity=10_000.0, open_positions=1)
+
+    assert result.action == "accumulated"
+    assert [o.type for o in ex.sent_orders] == ["market"]   # 청산 주문 없음
+    assert ex.sent_orders[0].side is Side.SELL
+    assert ex.sent_orders[0].amount == pytest.approx(0.1)   # 10 USDT / 100
+
+
+def test_accumulate_from_flat_is_a_plain_entry_without_stops():
+    ex = FakeExchange(price=100.0)
+    executor = make_executor(ex, notional_tiers=[10.0], max_position_notional_pct=1000.0)
+
+    result = executor.handle(symbol=SYMBOL, signal=ACC_LONG, position=Position.flat(SYMBOL),
+                             price=100.0, equity=10_000.0, open_positions=0)
+
+    assert result.action == "entered"
+    assert [o.type for o in ex.sent_orders] == ["market"]

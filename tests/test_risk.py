@@ -127,6 +127,7 @@ def test_kill_switch_resets_on_new_utc_day():
 
 # --- 확신도 기반 고정 금액 사이징 ------------------------------------------
 def tier_risk(**overrides) -> RiskManager:
+    overrides.setdefault("notional_tiers", [50.0, 100.0, 150.0, 200.0])
     cfg = RiskConfig(sizing_mode="tiers", max_position_notional_pct=100.0, **overrides)
     return RiskManager(cfg, leverage=3.0)
 
@@ -179,7 +180,8 @@ def test_tier_sizing_still_requires_a_stop_loss():
 def test_tier_sizing_is_still_capped_by_equity_share():
     """소액 계좌에서 고정 금액이 계좌를 넘어서면 안 된다."""
     risk = RiskManager(
-        RiskConfig(sizing_mode="tiers", max_position_notional_pct=10.0), leverage=3.0
+        RiskConfig(sizing_mode="tiers", max_position_notional_pct=10.0,
+                   notional_tiers=[50.0, 100.0, 150.0, 200.0]), leverage=3.0
     )
 
     decision = risk.evaluate_entry(
