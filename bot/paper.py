@@ -156,6 +156,7 @@ class PaperArena:
         start_equity: float = DEFAULT_START_EQUITY,
         taker_fee: float = TAKER_FEE,
         strategies: dict[str, Strategy] | None = None,
+        extra_strategies: dict[str, Strategy] | None = None,
     ) -> None:
         self.config = config
         self.store = store
@@ -165,6 +166,10 @@ class PaperArena:
 
         # 기본은 등록된 전략 전부. 주입하면 그 목록만 경쟁시킨다.
         self._strategies: dict[str, Strategy] = dict(strategies) if strategies else {}
+        # 카탈로그 밖의 참가자(AI 수동 매매 등). 카탈로그 빌드와 무관하게
+        # 합류하며, 저장된 포지션 복원 전에 넣어야 그들의 포지션도 살아난다.
+        if extra_strategies:
+            self._strategies.update(extra_strategies)
         self._positions: dict[tuple[str, str], PaperPosition] = {}
         self._errors: dict[str, str] = {}
         self._load(build_strategies=strategies is None)
@@ -671,10 +676,13 @@ class PaperArena:
                 continue
             trades = self.store.paper_trades(name)
             entry = catalog.get(name, {})
+            # 카탈로그 밖의 참가자(AI 수동 매매)는 전략 객체가 들고 있는
+            # 표기를 쓴다.
+            strategy_obj = self._strategies.get(name)
             stats = StrategyStats(
                 name=name,
-                summary=entry.get("summary", ""),
-                category=entry.get("category", "other"),
+                summary=entry.get("summary", "") or getattr(strategy_obj, "summary", ""),
+                category=entry.get("category") or getattr(strategy_obj, "category", "other"),
                 started_at=account["started_at"],
                 start_equity=account["start_equity"],
                 equity=account["start_equity"] + sum(t["pnl"] for t in trades),

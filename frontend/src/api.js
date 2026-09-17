@@ -76,6 +76,10 @@ export const api = {
   leaderboard: () => request('/api/leaderboard'),
   resetLeaderboard: (confirm) =>
     request('/api/leaderboard/reset', { method: 'POST', body: { confirm } }),
+  aiState: () => request('/api/ai/state'),
+  aiOrder: (trader, action, notional) =>
+    request('/api/ai/order', { method: 'POST', body: { trader, action, notional } }),
+  aiPrompt: (trader) => request(`/api/ai/prompt?trader=${encodeURIComponent(trader)}`),
   orderNotional: () => request('/api/settings/order-notional'),
   setOrderNotional: (value) =>
     request('/api/settings/order-notional', { method: 'POST', body: { value } }),

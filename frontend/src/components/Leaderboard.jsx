@@ -23,6 +23,7 @@ const CATEGORY_LABELS = {
   breakout: '돌파',
   combo: '조합',
   range: '횡보',
+  ai: 'AI 수동',
 }
 
 function pct(value, digits = 2) {

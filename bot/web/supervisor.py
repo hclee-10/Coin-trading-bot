@@ -21,6 +21,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Callable
 
+from bot.ai_traders import ManualTrader, build_traders
 from bot.config import Config
 from bot.engine import TradingEngine
 from bot.exchanges import create_exchange
@@ -124,8 +125,14 @@ class BotSupervisor:
                 except (ValueError, TypeError):
                     pass
         # 전략 경쟁 모의매매. 봇이 꺼져 있어도 순위표는 볼 수 있어야 하므로
-        # 여기서 만들어 들고 있는다.
-        self.arena = PaperArena(config, store) if store is not None else None
+        # 여기서 만들어 들고 있는다. AI 수동 매매(클로드/GPT/그록)도 같은
+        # 아레나에 합류해 알고리즘 전략들과 같은 규칙으로 경쟁한다.
+        self.ai_traders: dict[str, ManualTrader] = build_traders()
+        self.arena = (
+            PaperArena(config, store, extra_strategies=self.ai_traders)
+            if store is not None
+            else None
+        )
         self._exchange_factory = exchange_factory or (lambda: create_exchange(config.exchange))
         self._join_timeout = join_timeout
         self._lock = threading.Lock()
@@ -454,6 +461,24 @@ class BotSupervisor:
     def reset_paper(self) -> None:
         if self.arena is not None:
             self.arena.reset()
+        for trader in self.ai_traders.values():
+            trader.clear_pending()
+
+    # ------------------------------------------------------------------
+    def submit_ai_order(self, trader: str, action: str, notional: float = 0.0) -> dict:
+        """AI 수동 매매 주문을 큐에 넣는다. 다음 봇 주기에 체결된다."""
+        if trader not in self.ai_traders:
+            raise SupervisorError(f"알 수 없는 AI 트레이더 '{trader}'")
+        if self.arena is None:
+            raise SupervisorError("모의매매 저장소가 없어 AI 매매를 쓸 수 없습니다")
+        return self.ai_traders[trader].submit(action, notional)
+
+    def ai_state(self) -> list[dict]:
+        """AI 트레이더별 대기 주문. 화면의 '입력됨/체결 대기' 표시에 쓴다."""
+        return [
+            {"name": name, "label": t.label, "pending": t.pending()}
+            for name, t in self.ai_traders.items()
+        ]
 
     def performance(self, symbol: str | None = None) -> Performance:
         """기록해 둔 체결과 자기자본으로 성과를 계산한다."""

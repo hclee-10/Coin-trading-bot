@@ -126,7 +126,14 @@ class RiskManager:
                 False, f"손절가({stop_loss})가 {side.value} 포지션 방향과 맞지 않습니다"
             )
 
-        if self.cfg.sizing_mode == "tiers":
+        override = signal.metadata.get("notional") if signal.metadata else None
+        if override is not None and float(override) > 0:
+            # 신호가 금액을 직접 지정했다 (AI 수동 매매 등). 확신도-등급 매핑을
+            # 건너뛰지만, 아래의 상한·최소 주문금액 검사는 그대로 받는다.
+            notional = float(override)
+            base_amount = notional / entry_price
+            basis = f"지정 금액 {notional:.0f}"
+        elif self.cfg.sizing_mode == "tiers":
             notional = self.notional_for(strength)
             base_amount = notional / entry_price
             basis = f"확신도 {strength:.2f} → 명목가 {notional:.0f}"

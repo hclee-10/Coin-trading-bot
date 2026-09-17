@@ -9,6 +9,7 @@ import Chart from './components/Chart.jsx'
 import Performance from './components/Performance.jsx'
 import StrategyInfo from './components/StrategyInfo.jsx'
 import Leaderboard from './components/Leaderboard.jsx'
+import AITraders from './components/AITraders.jsx'
 import Logs from './components/Logs.jsx'
 
 const POLL_MS = 2000
@@ -28,6 +29,7 @@ export default function App() {
   const [config, setConfig] = useState(null)
   const [stale, setStale] = useState(false)
   const [leaderboard, setLeaderboard] = useState(null)
+  const [aiState, setAiState] = useState(null)
   const [logs, setLogs] = useState([])
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
@@ -73,6 +75,7 @@ export default function App() {
       api.chart().then(setChart),
       api.performance().then(setPerformance),
       api.leaderboard().then(setLeaderboard),
+      api.aiState().then(setAiState),
     ])
 
     const failures = results.filter((r) => r.status === 'rejected')
@@ -221,6 +224,14 @@ export default function App() {
         busy={busy}
         onReset={(confirm) => act(() => api.resetLeaderboard(confirm))}
         storage={status.storage}
+      />
+
+      <AITraders
+        state={aiState}
+        leaderboard={leaderboard}
+        busy={busy}
+        onOrder={(trader, action, notional) =>
+          act(() => api.aiOrder(trader, action, notional))}
       />
 
       <StrategyInfo catalog={catalog} />
