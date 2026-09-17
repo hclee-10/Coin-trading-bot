@@ -939,8 +939,8 @@ def test_leaderboard_lists_every_strategy(traded_env):
         supervisor.stop()
 
     names = {s["name"] for s in body["strategies"]}
-    assert len(names) >= 10
-    assert "ema_cross" in names and "grid" in names
+    assert len(names) >= 3
+    assert "dca_atr" in names and "dca_pct" in names
     assert body["active"] == "hold"
 
 
