@@ -341,6 +341,8 @@ def create_app(
                     "short_orders": s.short_orders,
                     "long_avg_price": s.long_avg_price,
                     "short_avg_price": s.short_avg_price,
+                    "long_notional": s.long_notional,
+                    "short_notional": s.short_notional,
                     "required_equity": s.required_equity,
                     "position_side": s.position_side,
                     "position_amount": s.position_amount,

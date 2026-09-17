@@ -961,7 +961,7 @@ def test_leaderboard_rows_carry_every_metric(traded_env):
         # 롱/숏 주문 횟수와 "청산을 버티는 데 필요했던 자본" — 무매도 적립식
         # 실험의 핵심 지표라 화면이 반드시 받아야 한다.
         "long_orders", "short_orders", "long_avg_price", "short_avg_price",
-        "required_equity",
+        "long_notional", "short_notional", "required_equity",
         "position_side", "position_amount", "position_entry", "position_notional",
     }
     assert required <= set(body["strategies"][0])

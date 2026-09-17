@@ -222,16 +222,35 @@ export default function Leaderboard({ data, catalog, onReset, busy, storage }) {
                             {s.wins}승 {s.losses}패 ·{' '}
                             <span className="pos">롱</span> 주문 {s.long_orders ?? 0}회
                             {s.long_avg_price > 0 &&
-                              ` (평균 ${s.long_avg_price.toLocaleString(undefined, { maximumFractionDigits: 1 })})`}
+                              ` (평균 ${s.long_avg_price.toLocaleString(undefined, { maximumFractionDigits: 1 })} · 합계 ${(s.long_notional ?? 0).toFixed(0)}$)`}
                             {' · '}
                             <span className="neg">숏</span> 주문 {s.short_orders ?? 0}회
                             {s.short_avg_price > 0 &&
-                              ` (평균 ${s.short_avg_price.toLocaleString(undefined, { maximumFractionDigits: 1 })})`}
+                              ` (평균 ${s.short_avg_price.toLocaleString(undefined, { maximumFractionDigits: 1 })} · 합계 ${(s.short_notional ?? 0).toFixed(0)}$)`}
                             {' '}· 최고 {signed(s.best_pnl)} ·
                             최악 {signed(s.worst_pnl)} · 수수료 {s.total_fee.toFixed(2)} ·
                             펀딩비 {s.total_funding.toFixed(2)} ·
                             가상 자기자본 {s.equity.toFixed(2)} / {s.start_equity.toFixed(0)}
                           </div>
+                          {/* 주문 기록은 이 기능이 배포된 시점부터 시작됐다. 그 전에
+                              쌓인 포지션은 롱/숏 횟수·평균가에 안 잡히므로, 기록된
+                              주문 합계로 설명이 안 되는 큰 포지션이 있으면 그 사실을
+                              말해 줘야 한다 — 아니면 "평균가는 수익권인데 왜 평가손실이
+                              크지?" 라는 착시가 생긴다. */}
+                          {s.position_amount > 0 &&
+                            s.position_notional >
+                              ((s.long_notional ?? 0) + (s.short_notional ?? 0)) * 1.2 && (
+                            <div className="hint" style={{ margin: '10px 0' }}>
+                              ⚠️ 보유 포지션({s.position_notional.toFixed(0)}$)의 대부분은{' '}
+                              <strong style={{ color: 'var(--text)' }}>주문 기록 시작 전</strong>에
+                              쌓였습니다. 위의 롱/숏 횟수·평균가는 기록된 주문
+                              (합계 {(((s.long_notional ?? 0) + (s.short_notional ?? 0))).toFixed(0)}$)만
+                              반영하므로, 평가손익은 포지션 평단
+                              ({s.position_entry.toLocaleString(undefined, { maximumFractionDigits: 1 })})
+                              기준으로 봐야 합니다. 기록 초기화를 하면 모든 숫자가 같은
+                              시점부터 다시 계산됩니다.
+                            </div>
+                          )}
                           <div className="hint" style={{ margin: '10px 0' }}>
                             손익 구성: 실현{' '}
                             <span className={(s.realized_pnl ?? 0) >= 0 ? 'pos' : 'neg'}>

@@ -399,7 +399,7 @@ class Store:
         for r in rows:
             avg = (r["notional"] / r["amount"]) if r["amount"] else 0.0
             out.setdefault(r["strategy"], {})[r["side"]] = {
-                "count": r["n"], "avg_price": avg,
+                "count": r["n"], "avg_price": avg, "notional": r["notional"] or 0.0,
             }
         return out
 

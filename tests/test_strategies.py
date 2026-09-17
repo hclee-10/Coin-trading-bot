@@ -157,7 +157,7 @@ def test_dca_variants_disagree_on_what_a_spike_is():
     """세 변형은 같은 시세에서 다른 급변을 본다 — 그래서 분리했다.
 
     아주 조용한 장의 +0.9% 점프: 평소 변동폭 대비로는 큰 급변(ATR 기준 잡음)
-    이지만 고정 1.5% 자에는 못 미친다(퍼센트 기준 무시).
+    이지만 고정 1.0% 자에는 못 미친다(퍼센트 기준 무시).
     """
     calm = [100.0 + (0.05 if i % 2 else -0.05) for i in range(60)]
     jump = series(calm + [100.9, 100.9], wick=0.02)
@@ -200,7 +200,7 @@ def test_dca_horizon_reacts_once_per_bar():
 
 def test_dca_horizons_disagree_by_design():
     """같은 움직임도 시간 단위에 따라 급변이기도, 아니기도 하다."""
-    # 5분봉 하나 -1.2%: 5분 자(±1.0%)에는 급변, 1시간 자(±2.5%)에는 아님
+    # 5분봉 하나 -1.2%: 5분 자(±0.6%)에는 급변, 1시간 자(±1.5%)에는 아님
     closes = [100.0] * 59 + [98.8, 98.8]
     ctx = context(series(closes))
 

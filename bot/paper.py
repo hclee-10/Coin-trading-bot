@@ -111,6 +111,8 @@ class StrategyStats:
     short_orders: int = 0               # 숏 방향으로 낸 주문 횟수
     long_avg_price: float = 0.0         # 롱 주문들의 수량가중 평균 체결가
     short_avg_price: float = 0.0        # 숏 주문들의 수량가중 평균 체결가
+    long_notional: float = 0.0          # 롱 주문 합계 금액 (USDT)
+    short_notional: float = 0.0         # 숏 주문 합계 금액 (USDT)
     required_equity: float = 0.0        # 청산을 버티는 데 필요했던 최소 자기자본
     position_side: str = ""             # 현재 순포지션 방향 (long | short | "")
     position_amount: float = 0.0        # 현재 순포지션 수량 (베이스 코인)
@@ -688,6 +690,8 @@ class PaperArena:
                 short_orders=int(order_stats.get(name, {}).get("short", {}).get("count", 0)),
                 long_avg_price=order_stats.get(name, {}).get("long", {}).get("avg_price", 0.0),
                 short_avg_price=order_stats.get(name, {}).get("short", {}).get("avg_price", 0.0),
+                long_notional=order_stats.get(name, {}).get("long", {}).get("notional", 0.0),
+                short_notional=order_stats.get(name, {}).get("short", {}).get("notional", 0.0),
                 required_equity=(
                     account["required_equity"]
                     if "required_equity" in account else 0.0
