@@ -14,14 +14,17 @@ ccxt 의 동기 클라이언트는 내부적으로 `requests.Session` 을 재사
 
 from __future__ import annotations
 
+import hmac
+import json
 import logging
+import secrets
 import threading
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Callable
 
-from bot.ai_traders import ManualTrader, build_traders
+from bot.ai_traders import AITrader, build_traders
 from bot.config import Config
 from bot.engine import TradingEngine
 from bot.exchanges import create_exchange
@@ -127,7 +130,19 @@ class BotSupervisor:
         # 전략 경쟁 모의매매. 봇이 꺼져 있어도 순위표는 볼 수 있어야 하므로
         # 여기서 만들어 들고 있는다. AI 수동 매매(클로드/GPT/그록)도 같은
         # 아레나에 합류해 알고리즘 전략들과 같은 규칙으로 경쟁한다.
-        self.ai_traders: dict[str, ManualTrader] = build_traders()
+        self.ai_traders: dict[str, AITrader] = build_traders()
+        if store is not None:
+            # 저장해 둔 봇 스펙을 복원한다. 즉시 주문(orders)은 다시 큐에 넣지
+            # 않는다 — 재배포할 때마다 같은 주문이 또 나가면 안 된다.
+            for name, trader in self.ai_traders.items():
+                saved = store.get_setting(f"ai_spec:{name}")
+                if not saved:
+                    continue
+                try:
+                    trader.set_spec(json.loads(saved))
+                    trader.clear_pending()
+                except (ValueError, TypeError):
+                    log.warning("'%s' 의 저장된 봇 스펙을 읽을 수 없습니다", name)
         self.arena = (
             PaperArena(config, store, extra_strategies=self.ai_traders)
             if store is not None
@@ -474,11 +489,53 @@ class BotSupervisor:
         return self.ai_traders[trader].submit(action, notional)
 
     def ai_state(self) -> list[dict]:
-        """AI 트레이더별 대기 주문. 화면의 '입력됨/체결 대기' 표시에 쓴다."""
+        """AI 트레이더별 현재 봇 스펙과 대기 주문."""
         return [
-            {"name": name, "label": t.label, "pending": t.pending()}
+            {
+                "name": name,
+                "label": t.label,
+                "pending": t.pending(),
+                "spec": t.spec,
+                "leverage": t.leverage,
+            }
             for name, t in self.ai_traders.items()
         ]
+
+    def ai_token(self, trader: str) -> str:
+        """AI 전용 접근 토큰. 처음 요청될 때 만들어 저장한다."""
+        if trader not in self.ai_traders:
+            raise SupervisorError(f"알 수 없는 AI 트레이더 '{trader}'")
+        if self.store is None:
+            raise SupervisorError("저장소가 없어 토큰을 만들 수 없습니다")
+        key = f"ai_token:{trader}"
+        existing = self.store.get_setting(key)
+        if existing:
+            return existing
+        token = "aibot_" + secrets.token_urlsafe(18)
+        self.store.set_setting(key, token)
+        log.warning("AI 접근 토큰 발급 — %s", trader)
+        return token
+
+    def ai_trader_by_token(self, token: str | None) -> AITrader | None:
+        """토큰으로 트레이더를 찾는다. 토큰이 곧 권한이다 — 자기 봇만 조작한다."""
+        if not token or self.store is None:
+            return None
+        for name, trader in self.ai_traders.items():
+            stored = self.store.get_setting(f"ai_token:{name}")
+            if stored and hmac.compare_digest(stored, token):
+                return trader
+        return None
+
+    def ai_set_spec(self, trader: str, raw) -> list[str]:
+        """봇 스펙 교체. 오류 목록이 비면 성공이고, 스펙은 저장소에 남는다."""
+        if trader not in self.ai_traders:
+            raise SupervisorError(f"알 수 없는 AI 트레이더 '{trader}'")
+        errors = self.ai_traders[trader].set_spec(raw)
+        if not errors and self.store is not None:
+            self.store.set_setting(
+                f"ai_spec:{trader}", json.dumps(self.ai_traders[trader].spec)
+            )
+        return errors
 
     def performance(self, symbol: str | None = None) -> Performance:
         """기록해 둔 체결과 자기자본으로 성과를 계산한다."""

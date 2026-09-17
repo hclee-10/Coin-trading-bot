@@ -962,6 +962,7 @@ def test_leaderboard_rows_carry_every_metric(traded_env):
         # 실험의 핵심 지표라 화면이 반드시 받아야 한다.
         "long_orders", "short_orders", "long_avg_price", "short_avg_price",
         "long_notional", "short_notional", "required_equity",
+        "market_return_pct", "vs_market_pct", "leverage",
         "position_side", "position_amount", "position_entry", "position_notional",
     }
     assert required <= set(body["strategies"][0])
@@ -1029,16 +1030,62 @@ def test_ai_order_rejects_bad_input(traded_env):
     ).status_code == 400
 
 
-def test_ai_prompt_carries_the_answer_format(traded_env):
-    """AI 웹에 그대로 붙여넣는 질문지 — 답변 형식이 반드시 들어 있어야 한다."""
-    client, *_ = traded_env
+def test_ai_handoff_carries_the_token_and_the_rules(traded_env):
+    """AI 에게 건네는 지시서 — 토큰·대회 규칙·스펙 형식이 전부 들어 있어야 한다."""
+    client, supervisor, _ = traded_env
     headers = login(client)
 
-    body = client.get("/api/ai/prompt?trader=ai_grok", headers=headers).json()
+    body = client.get("/api/ai/handoff?trader=ai_gemini", headers=headers).json()
 
-    assert "답변 형식" in body["prompt"]
-    assert "청산" in body["prompt"]
-    assert "규칙" in body["prompt"]
+    assert body["token"].startswith("aibot_")
+    assert body["token"] in body["markdown"]
+    assert "대회 규칙" in body["markdown"]
+    assert "5,000" in body["markdown"] or "5000" in body["markdown"]
+    assert "/api/aibot/spec" in body["markdown"]
+    # 같은 트레이더는 항상 같은 토큰 — 다시 눌러도 바뀌면 안 된다
+    again = client.get("/api/ai/handoff?trader=ai_gemini", headers=headers).json()
+    assert again["token"] == body["token"]
+
+
+def test_aibot_endpoints_work_with_the_token_only(traded_env):
+    """AI 는 대시보드 로그인 없이 전용 토큰만으로 자기 봇을 조작한다."""
+    client, *_ = traded_env
+    headers = login(client)
+    token = client.get("/api/ai/handoff?trader=ai_gpt", headers=headers).json()["token"]
+
+    # 토큰 없이는 거부
+    assert client.get("/api/aibot/state").status_code == 401
+
+    state = client.get("/api/aibot/state", headers={"X-AI-Token": token})
+    assert state.status_code == 200
+    assert state.json()["trader"] == "ai_gpt"
+
+    response = client.post(
+        "/api/aibot/spec", headers={"X-AI-Token": token},
+        json={"leverage": 5, "rules": [], "orders": [{"side": "long", "notional": 500}]},
+    )
+    assert response.status_code == 200
+    assert response.json()["ok"] is True
+
+    # 잘못된 스펙은 AI 가 고칠 수 있게 구체적인 오류를 돌려준다
+    bad = client.post(
+        "/api/aibot/spec", headers={"X-AI-Token": token}, json={"leverage": 99},
+    )
+    assert bad.status_code == 400
+    assert any("leverage" in e for e in bad.json()["errors"])
+
+
+def test_dashboard_spec_paste_applies_the_spec(traded_env):
+    client, supervisor, _ = traded_env
+    headers = login(client)
+
+    response = client.post(
+        "/api/ai/spec", headers=headers,
+        json={"trader": "ai_grok", "spec": {"leverage": 7, "memo": "붙여넣기 테스트"}},
+    )
+
+    assert response.status_code == 200
+    assert supervisor.ai_traders["ai_grok"].leverage == 7
 
 
 def test_ai_endpoints_require_auth(env):

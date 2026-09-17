@@ -226,13 +226,7 @@ export default function App() {
         storage={status.storage}
       />
 
-      <AITraders
-        state={aiState}
-        leaderboard={leaderboard}
-        busy={busy}
-        onOrder={(trader, action, notional) =>
-          act(() => api.aiOrder(trader, action, notional))}
-      />
+      <AITraders state={aiState} leaderboard={leaderboard} busy={busy} />
 
       <StrategyInfo catalog={catalog} />
 

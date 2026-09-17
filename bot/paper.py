@@ -118,6 +118,9 @@ class StrategyStats:
     position_amount: float = 0.0        # 현재 순포지션 수량 (베이스 코인)
     position_entry: float = 0.0         # 현재 순포지션 평균 단가
     position_notional: float = 0.0      # 현재 순포지션 명목가 (USDT)
+    market_return_pct: float | None = None   # 시작 시점부터 시장(현물 보유) 수익률
+    vs_market_pct: float | None = None       # 내 수익률 - 시장 수익률 (%p)
+    leverage: float = 0.0               # 이 참가자가 쓰는 레버리지 (0 = 공용값)
     error: str | None = None
 
     @property
@@ -272,6 +275,12 @@ class PaperArena:
         position = self._positions.get((name, symbol))
         price = ticker.last
 
+        # 계좌 시작 시점의 시장 가격을 기준선으로 남긴다. "시장 대비" 성적과
+        # AI 대회의 -5%p 규칙이 이 값으로 판정된다.
+        if account.get("benchmark_price", 0.0) <= 0 and price > 0:
+            self.store.update_paper_benchmark(name, price)
+            account["benchmark_price"] = price
+
         # 1) 펀딩비 정산. 정산 시각을 지났으면 손절을 보기 전에 먼저 반영한다 —
         #    실제 거래소도 보유 중인 포지션에 그대로 부과한다.
         if position is not None:
@@ -335,6 +344,27 @@ class PaperArena:
             )
         )
 
+        # AI 대회 규칙: 수익률이 (시장 수익률 - 5%p) 아래로 내려간 AI 봇은
+        # 노출을 늘리는 주문이 차단된다. 청산과 상계(반대 방향)는 허용 —
+        # 위험을 줄이는 길은 항상 열어 둔다.
+        if (
+            signal.is_entry
+            and getattr(strategy, "category", "") == "ai"
+            and account.get("benchmark_price", 0.0) > 0
+        ):
+            increasing = position is None or signal.target_side is position.side
+            if increasing:
+                marked = equity + (
+                    position.unrealized_net(price, self.taker_fee) if position else 0.0
+                )
+                my_return = (marked / account["start_equity"] - 1) * 100
+                market_return = (price / account["benchmark_price"] - 1) * 100
+                if my_return < market_return - 5.0:
+                    signal = Signal(reason=(
+                        f"대회 규칙 — 시장 대비 {my_return - market_return:+.1f}%p 로"
+                        " 노출 증가 차단 (청산·상계만 허용)"
+                    ))
+
         # 5) 체결
         if position is not None:
             if signal.action is SignalAction.EXIT:
@@ -381,10 +411,10 @@ class PaperArena:
         # "얼마가 있어야 청산을 안 당했는가" — 이 실험의 핵심 답. 매 주기,
         # 포지션 증거금(명목가/레버리지)에 그 순간의 평가손실을 더한 값이
         # 그 순간 계좌에 있어야 했던 최소 자기자본이고, 러닝 맥스를 남긴다.
+        # AI 봇은 스펙에서 고른 자기 레버리지를 쓴다.
+        leverage = getattr(strategy, "leverage", None) or self.config.exchange.leverage
         exposure = sum(abs(price * p.amount) for p in open_now)
-        needed = exposure / max(self.config.exchange.leverage, 1.0) + max(
-            0.0, -unrealized
-        )
+        needed = exposure / max(leverage, 1.0) + max(0.0, -unrealized)
         if needed > account.get("required_equity", 0.0):
             self.store.update_paper_required(name, needed)
 
@@ -662,8 +692,7 @@ class PaperArena:
     def leaderboard(self, price_hint: dict[str, float] | None = None) -> list[StrategyStats]:
         """전략별 성적. 수익률 내림차순."""
         prices = price_hint or {}
-        # 청산까지의 거리. 격리 마진에서 대략 1/레버리지 만큼 움직이면 청산된다.
-        liquidation_distance = 100.0 / max(self.config.exchange.leverage, 1.0)
+        current_price = next(iter(prices.values()), 0.0)
 
         catalog = {e["name"]: e for e in strategy_catalog()}
         accounts = {a["strategy"]: a for a in self.store.paper_accounts()}
@@ -736,10 +765,23 @@ class PaperArena:
                 + [p.worst_excursion_pct for p in open_positions]
                 + [0.0]
             )
-            # 청산가까지의 거리 대비 얼마나 갔는지. 100% 면 청산이다.
+            # 청산까지의 거리. 대략 1/레버리지 만큼 역행하면 청산이다.
+            # AI 봇은 스펙에서 고른 자기 레버리지 기준으로 잰다.
+            leverage = (
+                getattr(strategy_obj, "leverage", None)
+                or self.config.exchange.leverage
+            )
+            stats.leverage = leverage
+            liquidation_distance = 100.0 / max(leverage, 1.0)
             stats.liquidation_risk_pct = (
                 worst_excursion / liquidation_distance * 100 if liquidation_distance else 0.0
             )
+
+            # 시장 대비 성적. 같은 돈으로 시작 시점에 그냥 사서 들고 있었다면?
+            benchmark = account.get("benchmark_price", 0.0)
+            if benchmark > 0 and current_price > 0:
+                stats.market_return_pct = (current_price / benchmark - 1) * 100
+                stats.vs_market_pct = stats.return_pct - stats.market_return_pct
             rows.append(stats)
 
         rows.sort(key=lambda s: s.return_pct, reverse=True)

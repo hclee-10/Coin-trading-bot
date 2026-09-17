@@ -51,7 +51,10 @@ CREATE TABLE IF NOT EXISTS paper_accounts (
     peak_equity  REAL NOT NULL,
     -- 청산 안 당하고 버티는 데 지금까지 필요했던 최소 자기자본(러닝 맥스).
     -- 증거금 + 최악 순간의 평가손실. 무매도 적립식 실험의 핵심 답이다.
-    required_equity REAL NOT NULL DEFAULT 0
+    required_equity REAL NOT NULL DEFAULT 0,
+    -- 계좌가 시작된 순간의 시장 가격. "시장(현물 보유) 대비 얼마나 잘했는가"
+    -- 의 기준이고, AI 대회의 시장 대비 -5%p 규칙도 이 값으로 판정한다.
+    benchmark_price REAL NOT NULL DEFAULT 0
 );
 
 -- 모의매매가 낸 개별 주문. 왕복(paper_trades)과 달리 "몇 번 롱을 잡고 몇 번
@@ -117,6 +120,7 @@ _MIGRATIONS: tuple[tuple[str, str, str], ...] = (
     ("paper_positions", "next_funding_ms", "INTEGER NOT NULL DEFAULT 0"),
     ("paper_positions", "take_profit", "REAL NOT NULL DEFAULT 0"),
     ("paper_accounts", "required_equity", "REAL NOT NULL DEFAULT 0"),
+    ("paper_accounts", "benchmark_price", "REAL NOT NULL DEFAULT 0"),
 )
 
 
@@ -287,7 +291,7 @@ class Store:
                 return {
                     "strategy": strategy, "start_equity": start_equity,
                     "started_at": now_ms, "peak_equity": start_equity,
-                    "required_equity": 0.0,
+                    "required_equity": 0.0, "benchmark_price": 0.0,
                 }
             return dict(row)
 
@@ -296,6 +300,16 @@ class Store:
             self._db.execute(
                 "UPDATE paper_accounts SET peak_equity = ? WHERE strategy = ?",
                 (peak_equity, strategy),
+            )
+            self._db.commit()
+
+    def update_paper_benchmark(self, strategy: str, price: float) -> None:
+        """계좌 시작 시점의 시장 가격. 한 번 정해지면 바꾸지 않는다."""
+        with self._lock:
+            self._db.execute(
+                "UPDATE paper_accounts SET benchmark_price = ?"
+                " WHERE strategy = ? AND benchmark_price <= 0",
+                (price, strategy),
             )
             self._db.commit()
 

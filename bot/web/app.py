@@ -50,66 +50,121 @@ def _frontend_bundle(static_dir: Path | None) -> str | None:
     return match.group(1) if match else None
 
 
-def _ai_prompt_text(*, label, symbol, candles, row, leverage, margin_mode, timeframe) -> str:
-    """모든 AI 에게 똑같이 주는 질문지를 만든다.
-
-    같은 정보로 판단해야 공정한 경쟁이다 — 차이는 AI 의 판단뿐이어야 한다.
-    계좌 상태(포지션·자기자본)만 그 AI 자신의 것이다.
-    """
-    lines = [
-        "당신은 암호화폐 선물 모의투자 대회에 참가한 트레이더입니다.",
-        "아래 정보만 보고 지금 할 행동을 정하세요.",
-        "",
-        "[시장]",
-        f"- 종목: {symbol} 무기한 선물, 레버리지 {leverage:g}배, {margin_mode} 마진",
-    ]
+def _market_snapshot(candles: list[dict], timeframe: str) -> dict:
+    """시세 요약. 모든 AI 가 같은 것을 받는다 — 차이는 판단뿐이어야 한다."""
     closes = [c["close"] for c in candles]
-    if closes:
-        price = closes[-1]
-        lines.append(f"- 현재가: {price:,.1f} USDT")
-        # 봉 수로 기간을 계산한다 (기본 5분봉 → 12개=1시간).
-        for label_kr, bars in (("1시간", 12), ("6시간", 72), ("12시간", 144)):
-            if len(closes) > bars:
-                change = (price / closes[-1 - bars] - 1) * 100
-                lines.append(f"- {label_kr} 변화: {change:+.2f}%")
-        recent = candles[-12:]
-        lines.append(f"- 최근 {timeframe} 봉 {len(recent)}개 (시가→종가, 저가~고가):")
-        for c in recent:
-            lines.append(
-                f"  {c['open']:,.1f}→{c['close']:,.1f} ({c['low']:,.1f}~{c['high']:,.1f})"
-            )
-    else:
-        lines.append("- 시세 조회 실패 — 현재가를 직접 확인하고 판단하세요.")
+    if not closes:
+        return {"price": None, "changes": {}, "recent_bars": [], "timeframe": timeframe}
+    price = closes[-1]
+    changes = {}
+    # 봉 수로 기간을 계산한다 (기본 5분봉 → 12개=1시간).
+    for label, bars in (("1h", 12), ("6h", 72), ("12h", 144)):
+        if len(closes) > bars:
+            changes[label] = round((price / closes[-1 - bars] - 1) * 100, 3)
+    return {
+        "price": price,
+        "timeframe": timeframe,
+        "changes": changes,
+        "recent_bars": [
+            {"open": c["open"], "high": c["high"], "low": c["low"], "close": c["close"]}
+            for c in candles[-24:]
+        ],
+    }
 
-    lines += ["", "[내 계좌 (가상)]"]
-    if row is not None:
-        lines.append(f"- 자기자본: {row.equity:,.2f} USDT (시작 {row.start_equity:,.0f})")
-        if row.position_amount > 0:
-            side = "롱" if row.position_side == "long" else "숏"
-            lines.append(
-                f"- 포지션: {side} 명목 {row.position_notional:,.0f} USDT"
-                f" @ 평단 {row.position_entry:,.1f} (평가손익 {row.unrealized:+,.2f})"
-            )
-        else:
-            lines.append("- 포지션: 없음")
-    else:
-        lines.append("- 자기자본: 10,000 USDT (첫 판단)")
-        lines.append("- 포지션: 없음")
 
-    lines += [
-        "",
-        "[규칙]",
-        "- 단방향 모드: 같은 방향 주문은 쌓이고(평단 갱신), 반대 방향 주문은 그만큼 상계된다.",
-        "- 수수료 taker 0.05%, 펀딩비는 8시간마다 실제 비율로 부과된다.",
-        "- 손절/익절 예약 주문은 없다. 포지션을 닫으려면 다음 기회에 '청산'이라고 답해야 한다.",
-        "- 다음 판단 기회는 약 6시간 뒤다. 그 사이에는 개입할 수 없다.",
-        "",
-        "[답변 형식 — 첫 줄은 반드시 아래 중 하나]",
-        '"롱 <금액>달러" / "숏 <금액>달러" / "청산" / "관망"',
-        "금액은 1~100,000 사이 USDT 정수. 예: 숏 300달러",
-        "첫 줄 뒤에 판단 이유를 2~3문장으로 덧붙이세요.",
-    ]
-    return "\n".join(lines)
+_SPEC_SCHEMA_MD = """
+```json
+{
+  "leverage": 5,
+  "orders": [ {"side": "long", "notional": 1000} ],
+  "rules": [
+    {
+      "name": "dip_buy",
+      "timeframe": "5m",      // 1m | 5m | 15m | 1h | 4h
+      "bars": 3,               // 1~96 — 최근 N봉 누적 변화를 본다
+      "op": "lte",             // lte(이하) | gte(이상)
+      "change_pct": -0.6,      // ±50 이내 (%)
+      "side": "long",          // long | short | close
+      "notional": 500,          // 1~5000 USDT (회당 한도)
+      "cooldown_min": 30        // 발동 후 재발동 금지 시간 (0~1440분)
+    }
+  ],
+  "stop_loss_pct": 2.5,        // 0 = 손절 없음 (0~90)
+  "take_profit_pct": 5.0,      // 0 = 익절 없음 (0~500)
+  "max_position_notional": 30000,  // 0 = 레버리지 한도만 적용
+  "memo": "전략 요지 한두 문장"
+}
+```
+"""
+
+
+def _ai_handoff_md(*, label: str, token: str, base_url: str, symbol: str) -> str:
+    """AI 에게 한 번 건네는 지시문. 대회 규칙·접근 토큰·API 사용법·스펙 형식.
+
+    네 AI 모두 같은 문서를 받는다 — 토큰과 이름만 다르다.
+    """
+    base = base_url.rstrip("/")
+    return f"""# 암호화폐 선물 모의투자 대회 — {label} 봇 운영 지시서
+
+당신({label})은 4개의 AI(클로드·GPT·그록·제미나이)가 같은 조건으로 겨루는
+모의투자 대회의 참가자입니다. 당신은 **자기 봇을 직접 프로그래밍**해서 운영합니다.
+
+## 대회 규칙
+1. **목표**: 수익률 최대화. 단, 당신의 수익률이 (같은 기간 BTC 현물 보유 수익률 − 5%p)
+   아래로 내려가면 서버가 노출을 늘리는 주문을 자동 차단합니다 (청산·상계만 허용).
+   즉 시장보다 5%p 이상 뒤지지 않게 리스크를 관리해야 합니다.
+2. **자금**: 가상 10,000 USDT. 수수료 taker 0.05%(왕복 0.1%)와 펀딩비(8시간마다,
+   실제 비율)가 항상 부과됩니다.
+3. **레버리지**: 스펙에서 1~10배 선택. 총 노출(포지션 명목가)은 자기자본 × 레버리지를
+   넘을 수 없습니다.
+4. **주문 횟수 무제한**. 6시간마다 봇 스펙을 수정할 기회가 있습니다 — 성능을 계속
+   개선하세요.
+5. **회당 주문 한도 5,000 USDT**. 이보다 큰 주문은 거부됩니다.
+6. 시장: {symbol} 무기한 선물(Gate.io 시세), 단방향 모드 — 같은 방향 주문은 쌓이고
+   (평단 갱신), 반대 방향 주문은 그만큼 상계됩니다(넘치면 뒤집힘).
+7. 봇은 15초마다 스펙의 규칙을 평가합니다. 스펙의 stop_loss_pct / take_profit_pct 를
+   설정하면 포지션에 손절/익절이 자동 적용됩니다.
+
+## 당신의 접근 권한 (비밀 — 다른 참가자와 공유 금지)
+- API 주소: `{base}`
+- 접근 토큰: `{token}`
+
+## 봇 조작 방법 (둘 중 가능한 쪽을 쓰세요)
+
+### 방법 A — 직접 API 호출 (웹 접근/코드 실행이 가능한 경우)
+현재 상태 확인 (시세·내 계좌·현재 스펙):
+```
+GET {base}/api/aibot/state
+X-AI-Token: {token}
+```
+봇 스펙 교체:
+```
+POST {base}/api/aibot/spec
+X-AI-Token: {token}
+Content-Type: application/json
+
+(아래 '봇 스펙 형식'의 JSON 본문)
+```
+응답의 `errors` 가 비어 있으면 적용된 것입니다. 오류가 있으면 메시지를 읽고 고쳐서
+다시 보내세요.
+
+### 방법 B — JSON 으로만 답하기 (API 를 못 부르는 경우)
+사용자가 6시간마다 현재 상태(state JSON)를 붙여 줍니다. 당신은 **봇 스펙 JSON 하나만**
+코드블록으로 답하세요 — 사용자가 그대로 대시보드에 붙여넣습니다.
+
+## 봇 스펙 형식
+{_SPEC_SCHEMA_MD}
+- `orders`: 스펙 적용 즉시 1회 나가는 주문 (최대 5개). 지금 당장 포지션을 잡거나
+  정리할 때 씁니다.
+- `rules`: 15초마다 평가되는 상시 규칙 (최대 10개). "{{timeframe}} 봉 {{bars}}개 누적
+  변화가 {{change_pct}}% {{op}}" 이면 {{side}} {{notional}} USDT 주문. 같은 봉에는 한 번만
+  발동하고, `cooldown_min` 동안 재발동하지 않습니다.
+- 규칙 위(앞) 순서가 우선순위입니다. 한 주기에 하나만 발동합니다.
+
+## 지금 할 일
+현재 상태를 확인하고 첫 봇 스펙을 만들어 적용하세요. 6시간 뒤 성적을 보고
+스펙을 개선하게 됩니다. 스펙의 `memo` 에 전략 요지를 남기세요.
+"""
 
 
 class LoginRequest(BaseModel):
@@ -137,6 +192,11 @@ class AIOrderRequest(BaseModel):
     trader: str = Field(min_length=1, max_length=32)
     action: str = Field(min_length=1, max_length=16)   # long | short | close
     notional: float = 0.0
+
+
+class AISpecRequest(BaseModel):
+    trader: str = Field(min_length=1, max_length=32)
+    spec: dict
 
 
 def create_app(
@@ -416,6 +476,9 @@ def create_app(
                     "position_amount": s.position_amount,
                     "position_entry": s.position_entry,
                     "position_notional": s.position_notional,
+                    "market_return_pct": s.market_return_pct,
+                    "vs_market_pct": s.vs_market_pct,
+                    "leverage": s.leverage,
                     "total_fee": s.total_fee,
                     "total_funding": s.total_funding,
                     "best_pnl": s.best_pnl,
@@ -458,10 +521,10 @@ def create_app(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="동작은 long / short / close 중 하나여야 합니다",
             )
-        if body.action != "close" and not (1.0 <= body.notional <= 100_000.0):
+        if body.action != "close" and not (1.0 <= body.notional <= 5_000.0):
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="주문 금액은 1 ~ 100,000 USDT 사이여야 합니다",
+                detail="주문 금액은 1 ~ 5,000 USDT 사이여야 합니다 (회당 한도)",
             )
         try:
             order = supervisor.submit_ai_order(body.trader, body.action, body.notional)
@@ -475,31 +538,119 @@ def create_app(
         )
         return {"ok": True, "order": order, "running": supervisor.running}
 
-    @app.get("/api/ai/prompt")
-    def ai_prompt(trader: str = "ai_gpt", _: str = Depends(require_auth)) -> dict:
-        """모든 AI 에게 똑같이 줄 질문지. 시세와 그 AI 의 계좌 상태가 담긴다."""
+    @app.get("/api/ai/handoff")
+    def ai_handoff(trader: str, request: Request, _: str = Depends(require_auth)) -> dict:
+        """AI 에게 건네는 지시서(MD) — 대회 규칙·전용 토큰·API 사용법·스펙 형식."""
         traders = {t["name"]: t["label"] for t in supervisor.ai_state()}
         if trader not in traders:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=f"알 수 없는 AI 트레이더 '{trader}'",
             )
-        symbol = config.trading.symbols[0] if config.trading.symbols else None
-        if symbol is None:
+        try:
+            token = supervisor.ai_token(trader)
+        except SupervisorError as exc:
             raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST, detail="심볼이 설정되지 않았습니다"
-            )
-        candles = supervisor.candles(symbol)
-        row = next((s for s in supervisor.leaderboard() if s.name == trader), None)
+                status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)
+            ) from exc
+        symbol = config.trading.symbols[0] if config.trading.symbols else "BTC/USDT:USDT"
+        log.warning("AI 지시서(토큰 포함) 발급 — %s, ip=%s", trader, client_ip(request))
         return {
             "trader": trader,
-            "prompt": _ai_prompt_text(
-                label=traders[trader], symbol=symbol, candles=candles, row=row,
-                leverage=config.exchange.leverage,
-                margin_mode=config.exchange.margin_mode,
-                timeframe=config.trading.timeframe,
+            "token": token,
+            "markdown": _ai_handoff_md(
+                label=traders[trader], token=token,
+                base_url=str(request.base_url), symbol=symbol,
             ),
         }
+
+    @app.post("/api/ai/spec")
+    def ai_spec_via_dashboard(body: AISpecRequest, request: Request,
+                              _: str = Depends(require_auth)) -> dict:
+        """AI 가 답으로 준 봇 스펙(JSON)을 대신 붙여넣는 경로."""
+        try:
+            errors = supervisor.ai_set_spec(body.trader, body.spec)
+        except SupervisorError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)
+            ) from exc
+        if errors:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="스펙 오류: " + " / ".join(errors),
+            )
+        log.info("AI 봇 스펙 교체 — %s, ip=%s", body.trader, client_ip(request))
+        return {"ok": True, "spec": supervisor.ai_traders[body.trader].spec}
+
+    # --- AI 가 전용 토큰으로 직접 부르는 엔드포인트 -----------------------
+    def require_ai_token(request: Request):
+        token = request.headers.get("x-ai-token") or request.query_params.get("token")
+        trader = supervisor.ai_trader_by_token(token)
+        if trader is None:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="유효하지 않은 AI 토큰입니다",
+            )
+        return trader
+
+    @app.get("/api/aibot/state")
+    def aibot_state(request: Request) -> dict:
+        """토큰의 주인에게: 시세·자기 계좌·현재 스펙. 다른 참가자 정보는 없다."""
+        trader = require_ai_token(request)
+        symbol = config.trading.symbols[0] if config.trading.symbols else None
+        candles = supervisor.candles(symbol) if symbol else []
+        row = next((s for s in supervisor.leaderboard() if s.name == trader.name), None)
+        account = None
+        if row is not None:
+            account = {
+                "equity": row.equity,
+                "start_equity": row.start_equity,
+                "unrealized": row.unrealized,
+                "return_pct": row.return_pct,
+                "market_return_pct": row.market_return_pct,
+                "vs_market_pct": row.vs_market_pct,
+                "position": (
+                    {
+                        "side": row.position_side,
+                        "notional": row.position_notional,
+                        "entry_price": row.position_entry,
+                        "amount": row.position_amount,
+                    }
+                    if row.position_amount > 0 else None
+                ),
+                "trade_count": row.trade_count,
+                "total_fee": row.total_fee,
+                "total_funding": row.total_funding,
+            }
+        return {
+            "trader": trader.name,
+            "label": trader.label,
+            "market": _market_snapshot(candles, config.trading.timeframe),
+            "account": account,
+            "spec": trader.spec,
+            "pending_orders": trader.pending(),
+            "bot_running": supervisor.running,
+        }
+
+    @app.post("/api/aibot/spec")
+    async def aibot_spec(request: Request) -> dict:
+        """토큰의 주인이 자기 봇 스펙을 교체한다."""
+        trader = require_ai_token(request)
+        try:
+            raw = await request.json()
+        except Exception as exc:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="본문이 올바른 JSON 이 아닙니다",
+            ) from exc
+        errors = supervisor.ai_set_spec(trader.name, raw)
+        if errors:
+            return JSONResponse(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                content={"ok": False, "errors": errors},
+            )
+        log.info("AI 봇 스펙 교체(토큰) — %s", trader.name)
+        return {"ok": True, "errors": [], "spec": trader.spec}
 
     @app.post("/api/leaderboard/reset")
     def reset_leaderboard(body: CloseAllRequest, request: Request,
