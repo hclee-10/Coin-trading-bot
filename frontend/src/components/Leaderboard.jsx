@@ -129,7 +129,8 @@ export default function Leaderboard({ data, catalog, onReset, busy, storage }) {
                 <th>#</th>
                 <th>전략</th>
                 <th>수익률</th>
-                <th>수익금액</th>
+                <th>실현손익</th>
+                <th>평가손익</th>
                 <th>수수료</th>
                 <th>거래</th>
                 <th>롱/숏</th>
@@ -174,7 +175,15 @@ export default function Leaderboard({ data, catalog, onReset, busy, storage }) {
                     <td className={s.return_pct >= 0 ? 'pos' : 'neg'}>
                       <strong>{signed(s.return_pct)}%</strong>
                     </td>
-                    <td className={s.net_pnl >= 0 ? 'pos' : 'neg'}>{signed(s.net_pnl)}</td>
+                    {/* 실현 = 닫힌 거래에서 확정된 돈. 평가 = 지금 들고 있는
+                        포지션이 물려 있는(또는 벌고 있는) 돈. 합쳐 놓으면
+                        어디서 손실이 나는지 안 보여서 분리했다. */}
+                    <td className={(s.realized_pnl ?? 0) >= 0 ? 'pos' : 'neg'}>
+                      {signed(s.realized_pnl ?? s.net_pnl - s.unrealized)}
+                    </td>
+                    <td className={s.unrealized >= 0 ? 'pos' : 'neg'}>
+                      {signed(s.unrealized)}
+                    </td>
                     {/* 누적 수수료. 회전이 잦은 전략이 얼마를 갈아 넣고 있는지가
                         수익률만 봐서는 안 보인다. */}
                     <td className="hint">-{s.total_fee.toFixed(2)}</td>
@@ -201,7 +210,7 @@ export default function Leaderboard({ data, catalog, onReset, busy, storage }) {
                   </tr>
                   {expanded === s.name && (
                     <tr>
-                      <td colSpan={13} style={{ textAlign: 'left', padding: 0 }}>
+                      <td colSpan={14} style={{ textAlign: 'left', padding: 0 }}>
                         <div className="strategy-detail" style={{ margin: '0 16px 14px' }}>
                           <strong>{s.summary}</strong>
                           {s.error && (
@@ -222,6 +231,20 @@ export default function Leaderboard({ data, catalog, onReset, busy, storage }) {
                             최악 {signed(s.worst_pnl)} · 수수료 {s.total_fee.toFixed(2)} ·
                             펀딩비 {s.total_funding.toFixed(2)} ·
                             가상 자기자본 {s.equity.toFixed(2)} / {s.start_equity.toFixed(0)}
+                          </div>
+                          <div className="hint" style={{ margin: '10px 0' }}>
+                            손익 구성: 실현{' '}
+                            <span className={(s.realized_pnl ?? 0) >= 0 ? 'pos' : 'neg'}>
+                              {signed(s.realized_pnl ?? s.net_pnl - s.unrealized)}
+                            </span>
+                            {` (닫힌 거래 ${s.trade_count}건에서 확정)`}
+                            {' + '}평가{' '}
+                            <span className={s.unrealized >= 0 ? 'pos' : 'neg'}>
+                              {signed(s.unrealized)}
+                            </span>
+                            {' (보유 포지션을 지금 닫으면 — 수수료·펀딩비 포함)'}
+                            {' = '}
+                            <strong style={{ color: 'var(--text)' }}>{signed(s.net_pnl)}</strong>
                           </div>
                           {s.required_equity > 0 && (
                             <div className="hint" style={{ margin: '10px 0' }}>

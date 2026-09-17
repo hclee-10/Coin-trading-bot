@@ -324,6 +324,7 @@ def create_app(
                     "started_at": s.started_at,
                     "return_pct": s.return_pct,
                     "net_pnl": s.net_pnl,
+                    "realized_pnl": s.realized_pnl,
                     "equity": s.equity,
                     "start_equity": s.start_equity,
                     "unrealized": s.unrealized,
